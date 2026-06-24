@@ -1,2 +1,9 @@
 .omc/
 .DS_Store
+
+# 런타임 시크릿 — deploy.sh가 SSM에서 생성, 커밋 금지
+ai-voice.env
+llm.env
+
+# 배포 설정 지문 (호스트 로컬 상태)
+.deploy-state/

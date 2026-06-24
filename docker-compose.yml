@@ -1,0 +1,24 @@
+services:
+  ai-voice:
+    image: 676972757138.dkr.ecr.ap-northeast-2.amazonaws.com/moly-voice:latest
+    container_name: ai-voice
+    ports:
+      - "127.0.0.1:8001:8001"   # 루프백만 바인딩 — 외부 노출 금지
+    env_file:
+      - ./ai-voice.env
+    environment:
+      - LLM_URL=http://llm:8000/chat   # /chat 경로 필수 (빠지면 404)
+    depends_on:
+      - llm
+    restart: unless-stopped
+
+  llm:
+    image: 676972757138.dkr.ecr.ap-northeast-2.amazonaws.com/moly-llm:latest
+    container_name: llm
+    # 호스트 포트 매핑 없음: 내부 네트워크에서 http://llm:8000 으로만 접근
+    env_file:
+      - ./llm.env
+    environment:
+      # deploy.sh의 호스트 환경변수를 그대로 전달 — 여러 줄 값 안전
+      - SYSTEM_PROMPT
+    restart: unless-stopped
