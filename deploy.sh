@@ -1,9 +1,6 @@
-#!/usr/bin/env bash
 #
 # deploy.sh — 최신 ECR 이미지를 받아 moly 스택을 EC2에서 (재)기동한다.
 #
-# EC2 호스트(Ubuntu 24.04, ap-northeast-2)에서 실행한다. AWS 인증은 인스턴스
-# IAM 역할로 자동 처리되므로 자격증명을 넣지 않는다. 멱등 — 여러 번 실행해도 안전.
 #
 # 시크릿은 런타임에 SSM Parameter Store에서 읽어 .env 파일(chmod 600, git 제외)로
 # 생성한다. 시크릿 값은 절대 출력/로그에 노출하지 않는다.
