@@ -66,6 +66,7 @@ required_keys=(
   deepgram-api-key
   elevenlabs-api-key
   groq-api-key
+  anthropic-api-key
   openai-api-key
   supabase-db-connection-string
   system-prompt
@@ -103,12 +104,13 @@ chmod 600 "$SCRIPT_DIR/ai-voice.env"
 # `environment: - SYSTEM_PROMPT` 로 주입한다.
 cat > "$SCRIPT_DIR/llm.env" <<EOF
 GROQ_API_KEY=${PARAMS[groq-api-key]}
+ANTHROPIC_API_KEY=${PARAMS[anthropic-api-key]}
 OPENAI_API_KEY=${PARAMS[openai-api-key]}
 SUPABASE_DB_CONNECTION_STRING=${PARAMS[supabase-db-connection-string]}
 APP_NAME=moly-llm
 ENVIRONMENT=production
-LLM_PROVIDER=groq
-LLM_MODEL=llama-3.3-70b-versatile
+LLM_PROVIDER=anthropic
+LLM_MODEL=claude-sonnet-4-6
 MEMORY_TOP_K=5
 MEMORY_CACHE_TTL_SECONDS=300
 MEMORY_SAVE_EVERY_N_TURNS=5
