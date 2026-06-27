@@ -70,6 +70,10 @@ required_keys=(
   openai-api-key
   supabase-db-connection-string
   system-prompt
+  supabase-url
+  supabase-anon-key
+  slack-webhook-url
+  internal-service-token
 )
 missing=()
 for k in "${required_keys[@]}"; do
@@ -95,6 +99,10 @@ DEEPGRAM_API_KEY=${PARAMS[deepgram-api-key]}
 ELEVENLABS_API_KEY=${PARAMS[elevenlabs-api-key]}
 ELEVENLABS_VOICE_ID=cgSgspJ2msm6clMCkdW9
 SERVER_URL=https://moly-server.vercel.app
+SUPABASE_URL=${PARAMS[supabase-url]}
+SUPABASE_ANON_KEY=${PARAMS[supabase-anon-key]}
+SLACK_WEBHOOK_URL=${PARAMS[slack-webhook-url]}
+INTERNAL_SERVICE_TOKEN=${PARAMS[internal-service-token]}
 EOF
 chmod 600 "$SCRIPT_DIR/ai-voice.env"
 
@@ -117,6 +125,7 @@ MEMORY_SAVE_EVERY_N_TURNS=5
 EMBEDDER_PROVIDER=openai
 EMBEDDER_MODEL=text-embedding-3-small
 MEMORY_LLM_MODEL=gpt-4.1-mini
+INTERNAL_SERVICE_TOKEN=${PARAMS[internal-service-token]}
 EOF
 chmod 600 "$SCRIPT_DIR/llm.env"
 
