@@ -104,6 +104,7 @@ SUPABASE_ANON_KEY=${PARAMS[supabase-anon-key]}
 SLACK_WEBHOOK_URL=${PARAMS[slack-webhook-url]}
 INTERNAL_SERVICE_TOKEN=${PARAMS[internal-service-token]}
 STT_PROVIDER=${PARAMS[stt-provider]:-deepgram}
+REQUIRE_AUTH=${PARAMS[require-auth]:-false}
 EOF
 chmod 600 "$SCRIPT_DIR/ai-voice.env"
 
