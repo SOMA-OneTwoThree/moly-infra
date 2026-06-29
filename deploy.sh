@@ -50,8 +50,7 @@ PARAMS_JSON="$(aws ssm get-parameters-by-path \
   --output json)"
 
 # 파라미터 이름의 마지막 세그먼트를 키로, 값을 매핑한다.
-# 값은 jq -r 로 하나씩 추출해 실제 줄바꿈(SYSTEM_PROMPT)을 보존한다.
-# @tsv는 줄바꿈을 이스케이프하므로 사용하지 않는다.
+# 값은 jq -r 로 하나씩 추출한다(@tsv는 줄바꿈을 이스케이프하므로 사용하지 않는다).
 declare -A PARAMS=()
 while IFS= read -r name; do
   [ -z "$name" ] && continue
@@ -69,7 +68,6 @@ required_keys=(
   anthropic-api-key
   openai-api-key
   supabase-db-connection-string
-  system-prompt
   supabase-url
   supabase-anon-key
   slack-webhook-url
@@ -88,7 +86,7 @@ fi
 echo "==> 파라미터 ${#PARAMS[@]}개 수신"
 
 # ---------------------------------------------------------------------------
-# 4. .env 파일 생성 (chmod 600) + 여러 줄 SYSTEM_PROMPT export
+# 4. .env 파일 생성 (chmod 600)
 # ---------------------------------------------------------------------------
 echo "==> env 파일 작성"
 umask 077
@@ -109,9 +107,8 @@ EOF
 chmod 600 "$SCRIPT_DIR/ai-voice.env"
 
 # llm.env — 한 줄 값만.
-# SYSTEM_PROMPT은 줄바꿈 / '#' / 따옴표를 포함할 수 있어 env_file로 안전하게
-# 표현할 수 없으므로 여기에 넣지 않는다. 아래에서 export한 셸 변수를 compose의
-# `environment: - SYSTEM_PROMPT` 로 주입한다.
+# 시스템 프롬프트(페르소나)는 moly-llm 코드(app/chat/prompts.py:DEFAULT_SYSTEM_PROMPT)가
+# 단일 소스. env로 덮어쓰지 않는다(과거 SSM system-prompt 오버라이드가 "Molly" 오염 원인).
 cat > "$SCRIPT_DIR/llm.env" <<EOF
 GROQ_API_KEY=${PARAMS[groq-api-key]}
 ANTHROPIC_API_KEY=${PARAMS[anthropic-api-key]}
@@ -131,22 +128,17 @@ INTERNAL_SERVICE_TOKEN=${PARAMS[internal-service-token]}
 EOF
 chmod 600 "$SCRIPT_DIR/llm.env"
 
-# 여러 줄 값을 그대로 export하여 compose로 전달 (줄바꿈 보존)
-export SYSTEM_PROMPT="${PARAMS[system-prompt]}"
-
 # ---------------------------------------------------------------------------
 # 4-b. 서비스별 설정 지문 계산 (설정 변경 감지용)
 # ---------------------------------------------------------------------------
-# compose의 config-hash가 environment 패스스루(SYSTEM_PROMPT) 값 변경을 항상
-# 감지하지는 못하므로, 우리가 직접 서비스별 설정 해시를 계산해 변경 여부를 판단한다.
+# 서비스별 설정 해시를 계산해 변경 여부를 판단한다.
 # (이미지 콘텐츠 변경은 pull + up -d 가 자연 처리하므로 지문에 포함하지 않는다.)
 # 시크릿 값은 해시로만 다루고 출력하지 않는다.
 STATE_DIR="$SCRIPT_DIR/.deploy-state"
 mkdir -p "$STATE_DIR"
 
 new_voice_hash="$(sha256sum "$SCRIPT_DIR/ai-voice.env" | awk '{print $1}')"
-new_llm_hash="$( { cat "$SCRIPT_DIR/llm.env"; printf '\0%s' "$SYSTEM_PROMPT"; } \
-                | sha256sum | awk '{print $1}')"
+new_llm_hash="$(sha256sum "$SCRIPT_DIR/llm.env" | awk '{print $1}')"
 
 old_voice_hash="$(cat "$STATE_DIR/ai-voice.hash" 2>/dev/null || true)"
 old_llm_hash="$(cat "$STATE_DIR/llm.hash" 2>/dev/null || true)"

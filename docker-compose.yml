@@ -18,7 +18,6 @@ services:
     # 호스트 포트 매핑 없음: 내부 네트워크에서 http://llm:8000 으로만 접근
     env_file:
       - ./llm.env
-    environment:
-      # deploy.sh의 호스트 환경변수를 그대로 전달 — 여러 줄 값 안전
-      - SYSTEM_PROMPT
+    # 시스템 프롬프트(페르소나)는 moly-llm 코드의 DEFAULT_SYSTEM_PROMPT가 단일 소스 —
+    # env 주입 안 함(과거 SSM SYSTEM_PROMPT 오버라이드가 "Molly" 오염 원인).
     restart: unless-stopped
