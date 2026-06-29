@@ -31,8 +31,11 @@ ECR 이미지를 받아 EC2(Ubuntu 24.04, ap-northeast-2)에서 두 컨테이너
 ## 시크릿
 
 SSM Parameter Store `/moly/prod/` 에서 런타임에 조회한다. AWS 인증은 EC2 인스턴스
-IAM 역할로 처리되며 자격증명을 레포/스크립트에 두지 않는다. `SYSTEM_PROMPT`는 여러 줄
-값이라 `llm.env` 대신 compose `environment` 로 전달한다.
+IAM 역할로 처리되며 자격증명을 레포/스크립트에 두지 않는다.
+
+시스템 프롬프트(페르소나)는 SSM/env로 주입하지 않는다 — `moly-llm` 코드의
+`app/chat/prompts.py:DEFAULT_SYSTEM_PROMPT`가 단일 소스다. (과거 SSM `system-prompt`
+오버라이드가 코드 프롬프트를 덮어써 "Molly" 오염을 일으킨 적이 있어 제거함.)
 
 ## 의존성 (EC2)
 
