@@ -71,6 +71,7 @@ required_keys=(
   supabase-url
   supabase-anon-key
   supabase-service-role-key
+  revenuecat-webhook-auth
 )
 missing=()
 for k in "${required_keys[@]}"; do
@@ -94,9 +95,7 @@ umask 077
 # FCM_PROJECT_ID/FCM 파일은 옵션: 없으면 backend가 푸시만 조용히 스킵한다.
 cat > "$SCRIPT_DIR/backend.env" <<EOF
 ENVIRONMENT=production
-APP_STORE_BUNDLE_ID=com.geniusjun.moly
-APP_STORE_ENVIRONMENT=Production
-APP_STORE_APP_APPLE_ID=6784125709
+REVENUECAT_WEBHOOK_AUTH=${PARAMS[revenuecat-webhook-auth]}
 SUPABASE_URL=${PARAMS[supabase-url]}
 SUPABASE_ANON_KEY=${PARAMS[supabase-anon-key]}
 SUPABASE_SERVICE_ROLE_KEY=${PARAMS[supabase-service-role-key]}
