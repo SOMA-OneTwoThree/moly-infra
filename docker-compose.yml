@@ -11,6 +11,11 @@ services:
       # 파일이 없으면 컨테이너가 안 뜨므로 deploy.sh가 없을 때 빈 파일이라도 만든다.
       - ./secrets/fcm-service-account.json:/secrets/fcm-service-account.json:ro
     restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"   # 로그 무제한 누적으로 디스크 차는 것 방지
+        max-file: "3"
     healthcheck:
       # slim 이미지에 curl 없음 — 파이썬 표준 라이브러리로 /health 확인
       test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=3).status == 200 else 1)"]
@@ -31,3 +36,8 @@ services:
     volumes:
       - ./secrets/fcm-service-account.json:/secrets/fcm-service-account.json:ro
     restart: "no"
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
