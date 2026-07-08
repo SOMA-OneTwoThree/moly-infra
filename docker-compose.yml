@@ -1,23 +1,33 @@
 services:
-  ai-voice:
-    image: 676972757138.dkr.ecr.ap-northeast-2.amazonaws.com/moly-voice:latest
-    container_name: ai-voice
+  backend:
+    image: 676972757138.dkr.ecr.ap-northeast-2.amazonaws.com/moly-backend:latest
+    container_name: moly-backend
     ports:
-      - "127.0.0.1:8001:8001"   # 루프백만 바인딩 — 외부 노출 금지
+      - "127.0.0.1:8000:8000"   # 루프백만 바인딩 — 외부는 nginx(443)를 통해서만
     env_file:
-      - ./ai-voice.env
-    environment:
-      - LLM_URL=http://llm:8000/chat   # /chat 경로 필수 (빠지면 404)
-    depends_on:
-      - llm
+      - ./backend.env           # deploy.sh가 SSM에서 생성 (git 제외)
+    volumes:
+      # FCM 서비스 계정 JSON — deploy.sh가 SSM에서 파일로 생성.
+      # 파일이 없으면 컨테이너가 안 뜨므로 deploy.sh가 없을 때 빈 파일이라도 만든다.
+      - ./secrets/fcm-service-account.json:/secrets/fcm-service-account.json:ro
     restart: unless-stopped
+    healthcheck:
+      # slim 이미지에 curl 없음 — 파이썬 표준 라이브러리로 /health 확인
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=3).status == 200 else 1)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
 
-  llm:
-    image: 676972757138.dkr.ecr.ap-northeast-2.amazonaws.com/moly-llm:latest
-    container_name: llm
-    # 호스트 포트 매핑 없음: 내부 네트워크에서 http://llm:8000 으로만 접근
+  # 배치 워커 — 상주 아님. systemd timer(moly-worker.timer)가 매시 정각
+  # `docker compose run --rm worker`로 1틱 실행(멱등). profiles 덕분에
+  # `up -d`로는 안 뜨고, run으로만 실행된다.
+  worker:
+    image: 676972757138.dkr.ecr.ap-northeast-2.amazonaws.com/moly-backend:latest
+    profiles: ["worker"]
+    command: ["python", "-m", "worker"]
     env_file:
-      - ./llm.env
-    # 시스템 프롬프트(페르소나)는 moly-llm 코드의 DEFAULT_SYSTEM_PROMPT가 단일 소스 —
-    # env 주입 안 함(과거 SSM SYSTEM_PROMPT 오버라이드가 "Molly" 오염 원인).
-    restart: unless-stopped
+      - ./backend.env
+    volumes:
+      - ./secrets/fcm-service-account.json:/secrets/fcm-service-account.json:ro
+    restart: "no"

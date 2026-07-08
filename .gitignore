@@ -2,6 +2,9 @@
 .DS_Store
 
 # 런타임 시크릿 — deploy.sh가 SSM에서 생성, 커밋 금지
+backend.env
+secrets/
+# (구 스택 잔재 — EC2에 남아있을 수 있어 유지)
 ai-voice.env
 llm.env
 

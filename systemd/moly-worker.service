@@ -1,0 +1,13 @@
+# moly 배치 워커 — 1틱 실행 후 종료(멱등). moly-worker.timer가 매시 정각 트리거.
+# 이 파일은 moly-infra/systemd/ 가 원본이며, deploy.sh가 /etc/systemd/system/ 에 설치/갱신한다.
+[Unit]
+Description=Moly batch worker tick (diary/push, hourly)
+Requires=docker.service
+After=docker.service network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/root/moly-infra
+ExecStart=/usr/bin/docker compose -f /root/moly-infra/docker-compose.yml run --rm --quiet-pull worker
+# LLM 일기 생성이 유저 수에 비례해 길어질 수 있음 — 다음 정각 전엔 끝나야 하므로 50분 상한
+TimeoutStartSec=50min

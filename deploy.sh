@@ -1,9 +1,9 @@
 #
-# deploy.sh — 최신 ECR 이미지를 받아 moly 스택을 EC2에서 (재)기동한다.
-#
+# deploy.sh — 최신 ECR 이미지를 받아 moly-backend를 EC2에서 (재)기동한다.
 #
 # 시크릿은 런타임에 SSM Parameter Store에서 읽어 .env 파일(chmod 600, git 제외)로
 # 생성한다. 시크릿 값은 절대 출력/로그에 노출하지 않는다.
+# 배치 워커용 systemd 유닛(moly-worker.service/.timer)도 여기서 설치/갱신한다.
 
 set -euo pipefail
 
@@ -16,8 +16,10 @@ ECR_REGISTRY="676972757138.dkr.ecr.ap-northeast-2.amazonaws.com"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 COMPOSE_FILE="$SCRIPT_DIR/docker-compose.yml"
 SSM_PATH="/moly/prod/"
+SECRETS_DIR="$SCRIPT_DIR/secrets"
+FCM_FILE="$SECRETS_DIR/fcm-service-account.json"
 
-echo "==> moly 배포 시작 (region=$REGION, account=$ACCOUNT_ID)"
+echo "==> moly-backend 배포 시작 (region=$REGION, account=$ACCOUNT_ID)"
 
 # 의존성 확인
 for bin in docker aws jq; do
@@ -50,7 +52,8 @@ PARAMS_JSON="$(aws ssm get-parameters-by-path \
   --output json)"
 
 # 파라미터 이름의 마지막 세그먼트를 키로, 값을 매핑한다.
-# 값은 jq -r 로 하나씩 추출한다(@tsv는 줄바꿈을 이스케이프하므로 사용하지 않는다).
+# 값은 jq -r 로 하나씩 추출한다(@tsv는 줄바꿈을 이스케이프하므로 사용하지 않는다 —
+# fcm-service-account 같은 여러 줄 JSON 값 보존에 필수).
 declare -A PARAMS=()
 while IFS= read -r name; do
   [ -z "$name" ] && continue
@@ -62,16 +65,12 @@ done < <(printf '%s' "$PARAMS_JSON" | jq -r '.Parameters[].Name')
 
 # 필수 키 존재 확인 (이름만 출력 — 값은 절대 출력하지 않음)
 required_keys=(
-  deepgram-api-key
-  elevenlabs-api-key
-  groq-api-key
   anthropic-api-key
   openai-api-key
   supabase-db-connection-string
   supabase-url
   supabase-anon-key
-  slack-webhook-url
-  internal-service-token
+  supabase-service-role-key
 )
 missing=()
 for k in "${required_keys[@]}"; do
@@ -86,67 +85,53 @@ fi
 echo "==> 파라미터 ${#PARAMS[@]}개 수신"
 
 # ---------------------------------------------------------------------------
-# 4. .env 파일 생성 (chmod 600)
+# 4. env 파일 + FCM 서비스 계정 파일 생성
 # ---------------------------------------------------------------------------
 echo "==> env 파일 작성"
 umask 077
 
-# ai-voice.env — 한 줄 값만
-cat > "$SCRIPT_DIR/ai-voice.env" <<EOF
-DEEPGRAM_API_KEY=${PARAMS[deepgram-api-key]}
-ELEVENLABS_API_KEY=${PARAMS[elevenlabs-api-key]}
-ELEVENLABS_VOICE_ID=cgSgspJ2msm6clMCkdW9
-SERVER_URL=https://moly-server.vercel.app
+# backend.env — 한 줄 값만. (여러 줄 값인 fcm-service-account는 파일로 별도 처리)
+# FCM_PROJECT_ID/FCM 파일은 옵션: 없으면 backend가 푸시만 조용히 스킵한다.
+cat > "$SCRIPT_DIR/backend.env" <<EOF
+ENVIRONMENT=production
 SUPABASE_URL=${PARAMS[supabase-url]}
 SUPABASE_ANON_KEY=${PARAMS[supabase-anon-key]}
-SLACK_WEBHOOK_URL=${PARAMS[slack-webhook-url]}
-INTERNAL_SERVICE_TOKEN=${PARAMS[internal-service-token]}
-STT_PROVIDER=${PARAMS[stt-provider]:-deepgram}
-REQUIRE_AUTH=${PARAMS[require-auth]:-false}
-EOF
-chmod 600 "$SCRIPT_DIR/ai-voice.env"
-
-# llm.env — 한 줄 값만.
-# 시스템 프롬프트(페르소나)는 moly-llm 코드(app/chat/prompts.py:DEFAULT_SYSTEM_PROMPT)가
-# 단일 소스. env로 덮어쓰지 않는다(과거 SSM system-prompt 오버라이드가 "Molly" 오염 원인).
-cat > "$SCRIPT_DIR/llm.env" <<EOF
-GROQ_API_KEY=${PARAMS[groq-api-key]}
+SUPABASE_SERVICE_ROLE_KEY=${PARAMS[supabase-service-role-key]}
+SUPABASE_DB_CONNECTION_STRING=${PARAMS[supabase-db-connection-string]}
 ANTHROPIC_API_KEY=${PARAMS[anthropic-api-key]}
 OPENAI_API_KEY=${PARAMS[openai-api-key]}
-SUPABASE_DB_CONNECTION_STRING=${PARAMS[supabase-db-connection-string]}
-APP_NAME=moly-llm
-ENVIRONMENT=production
-LLM_PROVIDER=anthropic
-LLM_MODEL=claude-sonnet-4-6
-MEMORY_TOP_K=5
-MEMORY_CACHE_TTL_SECONDS=300
-MEMORY_SAVE_EVERY_N_TURNS=5
-EMBEDDER_PROVIDER=openai
-EMBEDDER_MODEL=text-embedding-3-small
-MEMORY_LLM_MODEL=gpt-4.1-mini
-INTERNAL_SERVICE_TOKEN=${PARAMS[internal-service-token]}
+FCM_PROJECT_ID=${PARAMS[fcm-project-id]:-}
+FCM_SERVICE_ACCOUNT_FILE=/secrets/fcm-service-account.json
 EOF
-chmod 600 "$SCRIPT_DIR/llm.env"
+chmod 600 "$SCRIPT_DIR/backend.env"
+
+# FCM 서비스 계정 JSON — SSM SecureString(여러 줄) → 파일.
+# 컨테이너는 비루트(appuser)로 돌아 파일에 other-read가 필요하다.
+# 대신 secrets/ 디렉토리를 700으로 잠가 호스트의 비루트 접근을 막는다.
+mkdir -p "$SECRETS_DIR"
+chmod 700 "$SECRETS_DIR"
+if [ -n "${PARAMS[fcm-service-account]+x}" ] && [ -n "${PARAMS[fcm-service-account]}" ]; then
+  printf '%s' "${PARAMS[fcm-service-account]}" > "$FCM_FILE"
+else
+  echo "WARN: /moly/prod/fcm-service-account 미설정 — FCM 푸시 비활성 (빈 파일로 대체)" >&2
+  : > "$FCM_FILE"
+fi
+chmod 644 "$FCM_FILE"
 
 # ---------------------------------------------------------------------------
-# 4-b. 서비스별 설정 지문 계산 (설정 변경 감지용)
+# 4-b. 설정 지문 계산 (설정 변경 감지용)
 # ---------------------------------------------------------------------------
-# 서비스별 설정 해시를 계산해 변경 여부를 판단한다.
+# env/FCM 파일이 바뀌면 backend 컨테이너를 강제 재생성한다.
 # (이미지 콘텐츠 변경은 pull + up -d 가 자연 처리하므로 지문에 포함하지 않는다.)
 # 시크릿 값은 해시로만 다루고 출력하지 않는다.
 STATE_DIR="$SCRIPT_DIR/.deploy-state"
 mkdir -p "$STATE_DIR"
 
-new_voice_hash="$(sha256sum "$SCRIPT_DIR/ai-voice.env" | awk '{print $1}')"
-new_llm_hash="$(sha256sum "$SCRIPT_DIR/llm.env" | awk '{print $1}')"
+new_backend_hash="$(cat "$SCRIPT_DIR/backend.env" "$FCM_FILE" | sha256sum | awk '{print $1}')"
+old_backend_hash="$(cat "$STATE_DIR/backend.hash" 2>/dev/null || true)"
 
-old_voice_hash="$(cat "$STATE_DIR/ai-voice.hash" 2>/dev/null || true)"
-old_llm_hash="$(cat "$STATE_DIR/llm.hash" 2>/dev/null || true)"
-
-# 이전 지문이 없거나(최초 배포 = 베이스라인 확보) 달라진 서비스만 강제 재생성한다.
 RECREATE=()
-if [ "$new_voice_hash" != "$old_voice_hash" ]; then RECREATE+=("ai-voice"); fi
-if [ "$new_llm_hash" != "$old_llm_hash" ]; then RECREATE+=("llm"); fi
+if [ "$new_backend_hash" != "$old_backend_hash" ]; then RECREATE+=("backend"); fi
 
 # ---------------------------------------------------------------------------
 # 5. ECR에서 최신 이미지 pull
@@ -157,31 +142,55 @@ docker compose -f "$COMPOSE_FILE" pull
 # ---------------------------------------------------------------------------
 # 6. 컨테이너 기동/갱신
 # ---------------------------------------------------------------------------
-# 먼저 일반 up -d 로 이미지 변경분을 자연 반영하고 전체를 기동(중단 최소화).
+# --remove-orphans: 구 스택(ai-voice, llm) 등 compose 파일에서 사라진 서비스의
+# 컨테이너를 자동 제거한다 (voice → backend 전환 컷오버 포함).
 echo "==> 컨테이너 기동"
-docker compose -f "$COMPOSE_FILE" up -d
+docker compose -f "$COMPOSE_FILE" up -d --remove-orphans
 
 # 설정만 바뀐 서비스는 compose가 못 잡을 수 있으므로 해당 서비스만 강제 재생성한다.
-# 안 바뀐 컨테이너는 건드리지 않는다.
 if [ "${#RECREATE[@]}" -gt 0 ]; then
   echo "==> 설정 변경 감지: ${RECREATE[*]} 재생성"
   docker compose -f "$COMPOSE_FILE" up -d --force-recreate "${RECREATE[@]}"
 fi
 
 # 다음 배포 비교를 위해 새 지문 저장
-printf '%s' "$new_voice_hash" > "$STATE_DIR/ai-voice.hash"
-printf '%s' "$new_llm_hash" > "$STATE_DIR/llm.hash"
+printf '%s' "$new_backend_hash" > "$STATE_DIR/backend.hash"
 
 # ---------------------------------------------------------------------------
-# 7. dangling/오래된 이미지 정리
+# 7. 배치 워커 systemd 유닛 설치/갱신 (매시 정각 1틱)
+# ---------------------------------------------------------------------------
+echo "==> 워커 systemd 유닛 확인"
+units_changed=0
+for unit in moly-worker.service moly-worker.timer; do
+  src="$SCRIPT_DIR/systemd/$unit"
+  dst="/etc/systemd/system/$unit"
+  if [ ! -f "$src" ]; then
+    echo "ERROR: 유닛 원본 없음: $src" >&2
+    exit 1
+  fi
+  if ! cmp -s "$src" "$dst" 2>/dev/null; then
+    install -m 644 "$src" "$dst"
+    units_changed=1
+    echo "  - $unit 설치/갱신"
+  fi
+done
+if [ "$units_changed" -eq 1 ]; then
+  systemctl daemon-reload
+fi
+# enable --now 는 멱등 — 이미 활성화돼 있으면 no-op (실패 시 stderr 그대로 노출)
+systemctl enable --now moly-worker.timer >/dev/null
+echo "  - moly-worker.timer 활성 ($(systemctl is-active moly-worker.timer))"
+
+# ---------------------------------------------------------------------------
+# 8. dangling/오래된 이미지 정리
 # ---------------------------------------------------------------------------
 echo "==> dangling 이미지 정리"
 docker image prune -f
 
 # ---------------------------------------------------------------------------
-# 8. 상태 출력
+# 9. 상태 출력
 # ---------------------------------------------------------------------------
 echo "==> 현재 상태"
 docker compose -f "$COMPOSE_FILE" ps
 
-echo "==> moly 배포 완료"
+echo "==> moly-backend 배포 완료"

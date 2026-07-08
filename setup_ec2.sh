@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# setup-ec2.sh — moly 음성 스택을 위한 EC2 호스트 부트스트랩.
+# setup-ec2.sh — moly-backend 스택을 위한 EC2 호스트 부트스트랩.
 #
 # 새 EC2(Ubuntu 24.04, ap-northeast-2)를 우리가 손으로 셋업했던 상태로 재현한다.
 # 이 스크립트는 호스트 레벨 의존성(docker / aws cli / nginx / certbot / jq)만 설치하고,
@@ -92,34 +92,34 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# 4. nginx (TLS 종료 + WebSocket 프록시 → 127.0.0.1:8001)
+# 4. nginx (TLS 종료 + HTTP 프록시 → 127.0.0.1:8000)
 # ---------------------------------------------------------------------------
 log "nginx 설치"
 apt-get install -y nginx
 systemctl enable --now nginx
 
-# WebSocket 프록시 설정 작성 (certbot이 이후 443 블록을 추가/수정한다)
+# HTTP 프록시 설정 작성 (certbot이 이후 443 블록을 추가/수정한다)
+# 최종 형태 참조본: nginx/voice.moly.asia.conf
 NGINX_SITE="/etc/nginx/sites-available/default"
-log "nginx 사이트 설정 작성 ($DOMAIN → 127.0.0.1:8001, WebSocket 업그레이드)"
+log "nginx 사이트 설정 작성 ($DOMAIN → 127.0.0.1:8000, HTTP 프록시)"
 cat > "$NGINX_SITE" <<NGINX
 server {
     listen 80;
     listen [::]:80;
     server_name ${DOMAIN};
 
+    client_max_body_size 1m;
+
     location / {
-        proxy_pass http://127.0.0.1:8001;
+        proxy_pass http://127.0.0.1:8000;
         proxy_http_version 1.1;
-        proxy_set_header Upgrade \$http_upgrade;
-        proxy_set_header Connection "upgrade";
         proxy_set_header Host \$host;
         proxy_set_header X-Real-IP \$remote_addr;
         proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto \$scheme;
 
-        # 음성 세션은 길게 유지된다 — 침묵 타임아웃으로 끊기지 않게 충분히 크게
-        proxy_read_timeout 3600s;
-        proxy_send_timeout 3600s;
+        # LLM 응답 생성이 길어질 수 있음 — 일반 API보다 넉넉히
+        proxy_read_timeout 120s;
     }
 }
 NGINX
@@ -183,11 +183,11 @@ cat <<DONE
  EC2 부트스트랩 완료.
 ------------------------------------------------------------
  다음 단계:
-   1) ECR에 moly-voice:latest, moly-llm:latest 이미지가 있는지 확인
-      (없으면 각 앱 레포의 GitHub Actions를 먼저 돌려 push)
+   1) ECR에 moly-backend:latest 이미지가 있는지 확인
+      (없으면 moly-backend 레포의 GitHub Actions를 먼저 돌려 push)
    2) 첫 배포 실행:
-        cd $INFRA_DIR && ./deploy.sh
-   3) 브라우저에서 https://$DOMAIN 접속해 음성 동작 확인
+        cd $INFRA_DIR && bash deploy.sh
+   3) curl https://$DOMAIN/health 로 200 확인
 
  확인 명령:
    docker compose -f $INFRA_DIR/docker-compose.yml ps
