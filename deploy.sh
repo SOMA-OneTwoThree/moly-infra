@@ -92,7 +92,9 @@ echo "==> env 파일 작성"
 umask 077
 
 # backend.env — 한 줄 값만. (여러 줄 값인 fcm-service-account는 파일로 별도 처리)
-# FCM_PROJECT_ID/FCM 파일은 옵션: 없으면 backend가 푸시만 조용히 스킵한다.
+# FCM_PROJECT_ID/FCM 파일·SLACK_WEBHOOK_URL은 옵션(:-): 없으면 backend가 조용히 스킵/no-op.
+# SLACK_WEBHOOK_URL은 워커 요약 알림용 — 이 줄이 빠지면 backend.env에 안 실려 워커가
+# 값을 못 받고(env len=0) 슬랙 요약이 조용히 no-op 된다(2026-07 워커 알림 누락 원인).
 cat > "$SCRIPT_DIR/backend.env" <<EOF
 ENVIRONMENT=production
 REVENUECAT_WEBHOOK_AUTH=${PARAMS[revenuecat-webhook-auth]}
@@ -102,6 +104,7 @@ SUPABASE_SERVICE_ROLE_KEY=${PARAMS[supabase-service-role-key]}
 SUPABASE_DB_CONNECTION_STRING=${PARAMS[supabase-db-connection-string]}
 ANTHROPIC_API_KEY=${PARAMS[anthropic-api-key]}
 OPENAI_API_KEY=${PARAMS[openai-api-key]}
+SLACK_WEBHOOK_URL=${PARAMS[slack-webhook-url]:-}
 FCM_PROJECT_ID=${PARAMS[fcm-project-id]:-}
 FCM_SERVICE_ACCOUNT_FILE=/secrets/fcm-service-account.json
 EOF
