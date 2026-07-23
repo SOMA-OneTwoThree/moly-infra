@@ -95,6 +95,9 @@ umask 077
 # FCM_PROJECT_ID/FCM 파일·SLACK_WEBHOOK_URL은 옵션(:-): 없으면 backend가 조용히 스킵/no-op.
 # SLACK_WEBHOOK_URL은 워커 요약 알림용 — 이 줄이 빠지면 backend.env에 안 실려 워커가
 # 값을 못 받고(env len=0) 슬랙 요약이 조용히 no-op 된다(2026-07 워커 알림 누락 원인).
+# 모니터링(SOMA-301): SLACK_ALERT/STATUS_WEBHOOK_URL(severity 라우팅)·HEALTH_TOKEN(deep/synthetic
+# 인증)·WORKER_PING_URL(Healthchecks 데드맨). 전부 옵션(:-) — 미설정 시 알림 no-op/폴백.
+# 여기 나열 안 하면 SSM에 있어도 컨테이너까지 안 감(backend.env는 명시 나열만 싣는다).
 cat > "$SCRIPT_DIR/backend.env" <<EOF
 ENVIRONMENT=production
 REVENUECAT_WEBHOOK_AUTH=${PARAMS[revenuecat-webhook-auth]}
@@ -105,6 +108,10 @@ SUPABASE_DB_CONNECTION_STRING=${PARAMS[supabase-db-connection-string]}
 ANTHROPIC_API_KEY=${PARAMS[anthropic-api-key]}
 OPENAI_API_KEY=${PARAMS[openai-api-key]}
 SLACK_WEBHOOK_URL=${PARAMS[slack-webhook-url]:-}
+SLACK_ALERT_WEBHOOK_URL=${PARAMS[slack-alert-webhook-url]:-}
+SLACK_STATUS_WEBHOOK_URL=${PARAMS[slack-status-webhook-url]:-}
+HEALTH_TOKEN=${PARAMS[health-token]:-}
+WORKER_PING_URL=${PARAMS[worker-ping-url]:-}
 FCM_PROJECT_ID=${PARAMS[fcm-project-id]:-}
 FCM_SERVICE_ACCOUNT_FILE=/secrets/fcm-service-account.json
 EOF
