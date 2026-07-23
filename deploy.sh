@@ -172,19 +172,22 @@ printf '%s' "$new_backend_hash" > "$STATE_DIR/backend.hash"
 # 6-b. 배포 헬스 게이트 — 컨테이너가 실제로 살아났는지 확인
 # ---------------------------------------------------------------------------
 # up -d는 "시작시켰다"까지만 보장한다. 크래시 루프(env 누락 등)여도 종료코드 0이라
-# Actions가 초록불이 되는 사고 방지 — /health 200을 확인할 때까지 배포 성공으로 안 친다.
-echo "==> 헬스 게이트 (/health 200 대기, 최대 60초)"
+# Actions가 초록불이 되는 사고 방지 — /health/ready 200을 확인할 때까지 배포 성공으로 안 친다.
+# /health(liveness)가 아니라 /health/ready(DB SELECT 1)인 이유: DB 엔진은 lazy 생성이라
+# 연결 문자열이 깨져도 부팅은 성공하고 /health는 200이다 — 그 상태로 배포가 초록불이 되면
+# 모든 실제 API가 500인 채 방치된다. ready는 이 케이스를 게이트에서 잡는다.
+echo "==> 헬스 게이트 (/health/ready 200 대기, 최대 60초)"
 healthy=0
 for i in $(seq 1 12); do
   sleep 5
-  if curl -sf --max-time 3 http://127.0.0.1:8000/health >/dev/null 2>&1; then
+  if curl -sf --max-time 5 http://127.0.0.1:8000/health/ready >/dev/null 2>&1; then
     healthy=1
-    echo "  - health OK (${i}번째 시도)"
+    echo "  - health ready OK (${i}번째 시도)"
     break
   fi
 done
 if [ "$healthy" -ne 1 ]; then
-  echo "ERROR: /health 응답 없음 — 컨테이너 상태/로그:" >&2
+  echo "ERROR: /health/ready 200 아님 — 컨테이너 상태/로그:" >&2
   docker ps --filter name=moly-backend >&2
   docker logs --tail 50 moly-backend >&2 || true
   exit 1
