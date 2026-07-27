@@ -19,6 +19,18 @@ SSM_PATH="/moly/prod/"
 SECRETS_DIR="$SCRIPT_DIR/secrets"
 FCM_FILE="$SECRETS_DIR/fcm-service-account.json"
 
+# 배포할 이미지 태그(불변 git-sha). GH Actions가 인자로 넘긴다. 인자 없이 실행(수동 재배포)하면
+# 마지막으로 배포된 태그를 재사용한다 — 수동 실행이 임의의 :latest로 되돌리는 사고 방지.
+# compose가 이 .env를 읽는다(:latest 고정 소비 중단 — 2대가 다른 시점에 pull해도 같은 빌드 보장).
+IMAGE_TAG="${1:-}"
+COMPOSE_ENV_FILE="$SCRIPT_DIR/.env"
+if [ -n "$IMAGE_TAG" ]; then
+  echo "IMAGE_TAG=$IMAGE_TAG" > "$COMPOSE_ENV_FILE"
+elif [ ! -f "$COMPOSE_ENV_FILE" ]; then
+  echo "IMAGE_TAG=latest" > "$COMPOSE_ENV_FILE"
+fi
+echo "==> 배포 태그: $(cat "$COMPOSE_ENV_FILE")"
+
 echo "==> moly-backend 배포 시작 (region=$REGION, account=$ACCOUNT_ID)"
 
 # 의존성 확인
@@ -30,6 +42,14 @@ for bin in docker aws jq curl; do
 done
 if ! docker compose version >/dev/null 2>&1; then
   echo "ERROR: 'docker compose' (v2) 를 사용할 수 없습니다" >&2
+  exit 1
+fi
+
+# 디스크 여유 확인 — sha 태그 고정 후엔 이미지가 태그를 달고 쌓이므로(§8에서 정리)
+# 80% 초과 상태로 pull을 시작하면 100%에서 컨테이너 기동 불가로 발견된다. 여기서 미리 실패.
+disk_usage="$(df --output=pcent / | tail -1 | tr -dc '0-9')"
+if [ "$disk_usage" -gt 80 ]; then
+  echo "ERROR: 루트 디스크 사용률 ${disk_usage}% (>80%) — 정리 후 재배포하세요" >&2
   exit 1
 fi
 
@@ -148,21 +168,24 @@ if [ "$new_backend_hash" != "$old_backend_hash" ]; then RECREATE+=("backend"); f
 # ---------------------------------------------------------------------------
 # 5. ECR에서 최신 이미지 pull
 # ---------------------------------------------------------------------------
+# --env-file 명시: compose의 .env 자동 탐색은 cwd에 좌우된다 — 탐색 실패 시 에러 없이
+# :latest로 폴백되므로(태그 고정 무음 무력화) 경로를 항상 못박는다.
 echo "==> 이미지 pull"
-docker compose -f "$COMPOSE_FILE" pull
+docker compose --env-file "$COMPOSE_ENV_FILE" -f "$COMPOSE_FILE" pull
 
 # ---------------------------------------------------------------------------
 # 6. 컨테이너 기동/갱신
 # ---------------------------------------------------------------------------
-# --remove-orphans: 구 스택(ai-voice, llm) 등 compose 파일에서 사라진 서비스의
-# 컨테이너를 자동 제거한다 (voice → backend 전환 컷오버 포함).
+# --remove-orphans는 쓰지 않는다: 원래 목적(구 ai-voice/llm 스택 정리)은 완료됐고,
+# compose 버전에 따라 실행 중인 `docker compose run worker` 틱 컨테이너를 orphan으로
+# 오인해 죽일 수 있다 — 일기 생성 틱이 배포 타이밍에 잘리는 사고 방지.
 echo "==> 컨테이너 기동"
-docker compose -f "$COMPOSE_FILE" up -d --remove-orphans
+docker compose --env-file "$COMPOSE_ENV_FILE" -f "$COMPOSE_FILE" up -d
 
 # 설정만 바뀐 서비스는 compose가 못 잡을 수 있으므로 해당 서비스만 강제 재생성한다.
 if [ "${#RECREATE[@]}" -gt 0 ]; then
   echo "==> 설정 변경 감지: ${RECREATE[*]} 재생성"
-  docker compose -f "$COMPOSE_FILE" up -d --force-recreate "${RECREATE[@]}"
+  docker compose --env-file "$COMPOSE_ENV_FILE" -f "$COMPOSE_FILE" up -d --force-recreate "${RECREATE[@]}"
 fi
 
 # 다음 배포 비교를 위해 새 지문 저장
@@ -193,41 +216,73 @@ if [ "$healthy" -ne 1 ]; then
   exit 1
 fi
 
+# 실제 뜬 이미지가 요청한 태그인지 검증 — .env 폴백/탐색 실패가 조용히 :latest를
+# 띄우는 사고를 여기서 잡는다.
+RUNNING_IMAGE="$(docker inspect --format '{{.Config.Image}}' moly-backend)"
+EXPECTED_TAG="$(grep '^IMAGE_TAG=' "$COMPOSE_ENV_FILE" | cut -d= -f2)"
+case "$RUNNING_IMAGE" in
+  *:"$EXPECTED_TAG") echo "  - 이미지 태그 일치: $RUNNING_IMAGE" ;;
+  *) echo "ERROR: 기대 태그 '$EXPECTED_TAG', 실제 '$RUNNING_IMAGE'" >&2; exit 1 ;;
+esac
+
+# ALB 경로(nginx :8080 → 8000) 확인 — nginx 블록은 수동 반영이라 여기가 유일한
+# 드리프트 감지 지점. 심링크 누락/reload 실패를 register 전에 즉시 잡는다.
+if ! curl -sf --max-time 5 http://127.0.0.1:8080/health >/dev/null 2>&1; then
+  echo "ERROR: nginx :8080 → backend 경로 실패 — sites-enabled/alb-8080 확인" >&2
+  exit 1
+fi
+echo "  - nginx :8080 경로 OK"
+
 # ---------------------------------------------------------------------------
 # 7. 배치 워커 systemd 유닛 설치/갱신 (매시 정각 1틱)
 # ---------------------------------------------------------------------------
-echo "==> 워커 systemd 유닛 확인"
-units_changed=0
-for unit in moly-worker.service moly-worker.timer; do
-  src="$SCRIPT_DIR/systemd/$unit"
-  dst="/etc/systemd/system/$unit"
-  if [ ! -f "$src" ]; then
-    echo "ERROR: 유닛 원본 없음: $src" >&2
-    exit 1
+# 워커는 단일 호스트에서만 돈다 — /etc/moly-worker-host 마커가 있는 인스턴스(#1)만.
+# 두 호스트에서 동시 실행되면 매시 틱이 2번 돌아 LLM 일기 생성 비용 2배 + 허위 실패 알림.
+# 마커는 호스트 재구축(AMI 복원 등) 시 수동 재생성 필요: sudo touch /etc/moly-worker-host
+# 워커 호스트를 옮길 때: 기존 마커 삭제 → 새 호스트 마커 생성 → 양쪽 재배포.
+WORKER_HOST_MARKER="/etc/moly-worker-host"
+if [ -f "$WORKER_HOST_MARKER" ]; then
+  echo "==> 워커 호스트 — systemd 유닛 확인"
+  units_changed=0
+  for unit in moly-worker.service moly-worker.timer; do
+    src="$SCRIPT_DIR/systemd/$unit"
+    dst="/etc/systemd/system/$unit"
+    if [ ! -f "$src" ]; then
+      echo "ERROR: 유닛 원본 없음: $src" >&2
+      exit 1
+    fi
+    if ! cmp -s "$src" "$dst" 2>/dev/null; then
+      install -m 644 "$src" "$dst"
+      units_changed=1
+      echo "  - $unit 설치/갱신"
+    fi
+  done
+  if [ "$units_changed" -eq 1 ]; then
+    systemctl daemon-reload
   fi
-  if ! cmp -s "$src" "$dst" 2>/dev/null; then
-    install -m 644 "$src" "$dst"
-    units_changed=1
-    echo "  - $unit 설치/갱신"
-  fi
-done
-if [ "$units_changed" -eq 1 ]; then
-  systemctl daemon-reload
+  # enable --now 는 멱등 — 이미 활성화돼 있으면 no-op (실패 시 stderr 그대로 노출)
+  systemctl enable --now moly-worker.timer >/dev/null
+  echo "  - moly-worker.timer 활성 ($(systemctl is-active moly-worker.timer))"
+else
+  echo "==> 워커 호스트 아님 — 타이머 비활성 보장"
+  systemctl disable --now moly-worker.timer >/dev/null 2>&1 || true
 fi
-# enable --now 는 멱등 — 이미 활성화돼 있으면 no-op (실패 시 stderr 그대로 노출)
-systemctl enable --now moly-worker.timer >/dev/null
-echo "  - moly-worker.timer 활성 ($(systemctl is-active moly-worker.timer))"
 
 # ---------------------------------------------------------------------------
 # 8. dangling/오래된 이미지 정리
 # ---------------------------------------------------------------------------
-echo "==> dangling 이미지 정리"
+# sha 태그 고정 후엔 과거 이미지가 태그를 달고 영구 잔존한다(prune -f는 dangling 전용이라
+# 아무것도 못 지움) — 방치하면 배포 10~15회에 디스크 풀. 최근 3개만 남기고 제거한다.
+echo "==> 오래된 이미지 정리 (moly-backend 최근 3개 유지)"
 docker image prune -f
+docker images --format '{{.Repository}}:{{.Tag}}\t{{.CreatedAt}}' \
+  | grep '/moly-backend:' | grep -v ':latest' | sort -t"$(printf '\t')" -k2 -r \
+  | tail -n +4 | cut -f1 | xargs -r docker rmi >/dev/null 2>&1 || true
 
 # ---------------------------------------------------------------------------
 # 9. 상태 출력
 # ---------------------------------------------------------------------------
 echo "==> 현재 상태"
-docker compose -f "$COMPOSE_FILE" ps
+docker compose --env-file "$COMPOSE_ENV_FILE" -f "$COMPOSE_FILE" ps
 
 echo "==> moly-backend 배포 완료"
