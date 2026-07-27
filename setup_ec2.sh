@@ -10,7 +10,7 @@
 #   voice.moly.asia (가비아 CNAME) → ALB(443, ACM TLS 종료) → TG(HTTP:8080)
 #     → 각 EC2의 nginx :8080 → 127.0.0.1:8000 백엔드 컨테이너
 #   TLS는 ALB가 종료하므로 인스턴스에는 certbot/Let's Encrypt가 필요 없다.
-#   (레거시: 인스턴스 #1에만 EIP + nginx :443 + LE 경로가 남아 있음 — 신규 인스턴스엔 만들지 않는다)
+#   (레거시 EIP + nginx :443 + LE 경로는 2026-07-27 폐기 완료 — 어떤 인스턴스에도 만들지 않는다)
 #
 # 전제:
 #   - Ubuntu 24.04, x86_64, IMDSv2
@@ -185,6 +185,6 @@ cat <<DONE
    - ECR pull (ecr:GetAuthorizationToken + BatchGetImage 등)  ← 빠지면 배포 실패
 
  참고: TLS는 ALB(ACM)가 종료하므로 이 호스트에 certbot/LE는 설치하지 않는다.
-       레거시 EIP+LE 경로는 인스턴스 #1에만 존재하며 폐기 예정.
+       (레거시 EIP+LE 경로는 2026-07-27 폐기 완료 — 복원 절차는 docs/INFRA.md 참조)
 ============================================================
 DONE
