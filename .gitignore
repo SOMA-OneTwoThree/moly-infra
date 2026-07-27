@@ -10,3 +10,6 @@ llm.env
 
 # 배포 설정 지문 (호스트 로컬 상태)
 .deploy-state/
+# compose용 이미지 태그 — deploy.sh가 생성 (호스트 로컬 상태)
+.env
+docs/
