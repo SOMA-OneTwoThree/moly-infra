@@ -19,6 +19,18 @@ SSM_PATH="/moly/prod/"
 SECRETS_DIR="$SCRIPT_DIR/secrets"
 FCM_FILE="$SECRETS_DIR/fcm-service-account.json"
 
+# 배포할 이미지 태그(불변 git-sha). GH Actions가 인자로 넘긴다. 인자 없이 실행(수동 재배포)하면
+# 마지막으로 배포된 태그를 재사용한다 — 수동 실행이 임의의 :latest로 되돌리는 사고 방지.
+# compose가 이 .env를 읽는다(:latest 고정 소비 중단 — 2대가 다른 시점에 pull해도 같은 빌드 보장).
+IMAGE_TAG="${1:-}"
+COMPOSE_ENV_FILE="$SCRIPT_DIR/.env"
+if [ -n "$IMAGE_TAG" ]; then
+  echo "IMAGE_TAG=$IMAGE_TAG" > "$COMPOSE_ENV_FILE"
+elif [ ! -f "$COMPOSE_ENV_FILE" ]; then
+  echo "IMAGE_TAG=latest" > "$COMPOSE_ENV_FILE"
+fi
+echo "==> 배포 태그: $(cat "$COMPOSE_ENV_FILE")"
+
 echo "==> moly-backend 배포 시작 (region=$REGION, account=$ACCOUNT_ID)"
 
 # 의존성 확인
@@ -30,6 +42,14 @@ for bin in docker aws jq curl; do
 done
 if ! docker compose version >/dev/null 2>&1; then
   echo "ERROR: 'docker compose' (v2) 를 사용할 수 없습니다" >&2
+  exit 1
+fi
+
+# 디스크 여유 확인 — sha 태그 고정 후엔 이미지가 태그를 달고 쌓이므로(§8에서 정리)
+# 80% 초과 상태로 pull을 시작하면 100%에서 컨테이너 기동 불가로 발견된다. 여기서 미리 실패.
+disk_usage="$(df --output=pcent / | tail -1 | tr -dc '0-9')"
+if [ "$disk_usage" -gt 80 ]; then
+  echo "ERROR: 루트 디스크 사용률 ${disk_usage}% (>80%) — 정리 후 재배포하세요" >&2
   exit 1
 fi
 
@@ -95,6 +115,9 @@ umask 077
 # FCM_PROJECT_ID/FCM 파일·SLACK_WEBHOOK_URL은 옵션(:-): 없으면 backend가 조용히 스킵/no-op.
 # SLACK_WEBHOOK_URL은 워커 요약 알림용 — 이 줄이 빠지면 backend.env에 안 실려 워커가
 # 값을 못 받고(env len=0) 슬랙 요약이 조용히 no-op 된다(2026-07 워커 알림 누락 원인).
+# 모니터링(SOMA-301): SLACK_ALERT/STATUS_WEBHOOK_URL(severity 라우팅)·HEALTH_TOKEN(deep/synthetic
+# 인증)·WORKER_PING_URL(Healthchecks 데드맨). 전부 옵션(:-) — 미설정 시 알림 no-op/폴백.
+# 여기 나열 안 하면 SSM에 있어도 컨테이너까지 안 감(backend.env는 명시 나열만 싣는다).
 cat > "$SCRIPT_DIR/backend.env" <<EOF
 ENVIRONMENT=production
 REVENUECAT_WEBHOOK_AUTH=${PARAMS[revenuecat-webhook-auth]}
@@ -105,6 +128,10 @@ SUPABASE_DB_CONNECTION_STRING=${PARAMS[supabase-db-connection-string]}
 ANTHROPIC_API_KEY=${PARAMS[anthropic-api-key]}
 OPENAI_API_KEY=${PARAMS[openai-api-key]}
 SLACK_WEBHOOK_URL=${PARAMS[slack-webhook-url]:-}
+SLACK_ALERT_WEBHOOK_URL=${PARAMS[slack-alert-webhook-url]:-}
+SLACK_STATUS_WEBHOOK_URL=${PARAMS[slack-status-webhook-url]:-}
+HEALTH_TOKEN=${PARAMS[health-token]:-}
+WORKER_PING_URL=${PARAMS[worker-ping-url]:-}
 FCM_PROJECT_ID=${PARAMS[fcm-project-id]:-}
 FCM_SERVICE_ACCOUNT_FILE=/secrets/fcm-service-account.json
 EOF
@@ -141,21 +168,24 @@ if [ "$new_backend_hash" != "$old_backend_hash" ]; then RECREATE+=("backend"); f
 # ---------------------------------------------------------------------------
 # 5. ECR에서 최신 이미지 pull
 # ---------------------------------------------------------------------------
+# --env-file 명시: compose의 .env 자동 탐색은 cwd에 좌우된다 — 탐색 실패 시 에러 없이
+# :latest로 폴백되므로(태그 고정 무음 무력화) 경로를 항상 못박는다.
 echo "==> 이미지 pull"
-docker compose -f "$COMPOSE_FILE" pull
+docker compose --env-file "$COMPOSE_ENV_FILE" -f "$COMPOSE_FILE" pull
 
 # ---------------------------------------------------------------------------
 # 6. 컨테이너 기동/갱신
 # ---------------------------------------------------------------------------
-# --remove-orphans: 구 스택(ai-voice, llm) 등 compose 파일에서 사라진 서비스의
-# 컨테이너를 자동 제거한다 (voice → backend 전환 컷오버 포함).
+# --remove-orphans는 쓰지 않는다: 원래 목적(구 ai-voice/llm 스택 정리)은 완료됐고,
+# compose 버전에 따라 실행 중인 `docker compose run worker` 틱 컨테이너를 orphan으로
+# 오인해 죽일 수 있다 — 일기 생성 틱이 배포 타이밍에 잘리는 사고 방지.
 echo "==> 컨테이너 기동"
-docker compose -f "$COMPOSE_FILE" up -d --remove-orphans
+docker compose --env-file "$COMPOSE_ENV_FILE" -f "$COMPOSE_FILE" up -d
 
 # 설정만 바뀐 서비스는 compose가 못 잡을 수 있으므로 해당 서비스만 강제 재생성한다.
 if [ "${#RECREATE[@]}" -gt 0 ]; then
   echo "==> 설정 변경 감지: ${RECREATE[*]} 재생성"
-  docker compose -f "$COMPOSE_FILE" up -d --force-recreate "${RECREATE[@]}"
+  docker compose --env-file "$COMPOSE_ENV_FILE" -f "$COMPOSE_FILE" up -d --force-recreate "${RECREATE[@]}"
 fi
 
 # 다음 배포 비교를 위해 새 지문 저장
@@ -165,59 +195,94 @@ printf '%s' "$new_backend_hash" > "$STATE_DIR/backend.hash"
 # 6-b. 배포 헬스 게이트 — 컨테이너가 실제로 살아났는지 확인
 # ---------------------------------------------------------------------------
 # up -d는 "시작시켰다"까지만 보장한다. 크래시 루프(env 누락 등)여도 종료코드 0이라
-# Actions가 초록불이 되는 사고 방지 — /health 200을 확인할 때까지 배포 성공으로 안 친다.
-echo "==> 헬스 게이트 (/health 200 대기, 최대 60초)"
+# Actions가 초록불이 되는 사고 방지 — /health/ready 200을 확인할 때까지 배포 성공으로 안 친다.
+# /health(liveness)가 아니라 /health/ready(DB SELECT 1)인 이유: DB 엔진은 lazy 생성이라
+# 연결 문자열이 깨져도 부팅은 성공하고 /health는 200이다 — 그 상태로 배포가 초록불이 되면
+# 모든 실제 API가 500인 채 방치된다. ready는 이 케이스를 게이트에서 잡는다.
+echo "==> 헬스 게이트 (/health/ready 200 대기, 최대 60초)"
 healthy=0
 for i in $(seq 1 12); do
   sleep 5
-  if curl -sf --max-time 3 http://127.0.0.1:8000/health >/dev/null 2>&1; then
+  if curl -sf --max-time 5 http://127.0.0.1:8000/health/ready >/dev/null 2>&1; then
     healthy=1
-    echo "  - health OK (${i}번째 시도)"
+    echo "  - health ready OK (${i}번째 시도)"
     break
   fi
 done
 if [ "$healthy" -ne 1 ]; then
-  echo "ERROR: /health 응답 없음 — 컨테이너 상태/로그:" >&2
+  echo "ERROR: /health/ready 200 아님 — 컨테이너 상태/로그:" >&2
   docker ps --filter name=moly-backend >&2
   docker logs --tail 50 moly-backend >&2 || true
   exit 1
 fi
 
-# ---------------------------------------------------------------------------
-# 7. 배치 워커 systemd 유닛 설치/갱신 (매시 정각 1틱)
-# ---------------------------------------------------------------------------
-echo "==> 워커 systemd 유닛 확인"
-units_changed=0
-for unit in moly-worker.service moly-worker.timer; do
-  src="$SCRIPT_DIR/systemd/$unit"
-  dst="/etc/systemd/system/$unit"
-  if [ ! -f "$src" ]; then
-    echo "ERROR: 유닛 원본 없음: $src" >&2
-    exit 1
-  fi
-  if ! cmp -s "$src" "$dst" 2>/dev/null; then
-    install -m 644 "$src" "$dst"
-    units_changed=1
-    echo "  - $unit 설치/갱신"
-  fi
-done
-if [ "$units_changed" -eq 1 ]; then
-  systemctl daemon-reload
+# 실제 뜬 이미지가 요청한 태그인지 검증 — .env 폴백/탐색 실패가 조용히 :latest를
+# 띄우는 사고를 여기서 잡는다.
+RUNNING_IMAGE="$(docker inspect --format '{{.Config.Image}}' moly-backend)"
+EXPECTED_TAG="$(grep '^IMAGE_TAG=' "$COMPOSE_ENV_FILE" | cut -d= -f2)"
+case "$RUNNING_IMAGE" in
+  *:"$EXPECTED_TAG") echo "  - 이미지 태그 일치: $RUNNING_IMAGE" ;;
+  *) echo "ERROR: 기대 태그 '$EXPECTED_TAG', 실제 '$RUNNING_IMAGE'" >&2; exit 1 ;;
+esac
+
+# ALB 경로(nginx :8080 → 8000) 확인 — nginx 블록은 수동 반영이라 여기가 유일한
+# 드리프트 감지 지점. 심링크 누락/reload 실패를 register 전에 즉시 잡는다.
+if ! curl -sf --max-time 5 http://127.0.0.1:8080/health >/dev/null 2>&1; then
+  echo "ERROR: nginx :8080 → backend 경로 실패 — sites-enabled/alb-8080 확인" >&2
+  exit 1
 fi
-# enable --now 는 멱등 — 이미 활성화돼 있으면 no-op (실패 시 stderr 그대로 노출)
-systemctl enable --now moly-worker.timer >/dev/null
-echo "  - moly-worker.timer 활성 ($(systemctl is-active moly-worker.timer))"
+echo "  - nginx :8080 경로 OK"
+
+# ---------------------------------------------------------------------------
+# 7. 배치 워커 systemd 유닛 설치/갱신 (15분마다 1틱 — :00/:15/:30/:45)
+# ---------------------------------------------------------------------------
+# 워커는 단일 호스트에서만 돈다 — /etc/moly-worker-host 마커가 있는 인스턴스(#1)만.
+# 두 호스트에서 동시 실행되면 틱마다 2번 돌아 LLM 일기 생성 비용 2배 + 허위 실패 알림.
+# 마커는 호스트 재구축(AMI 복원 등) 시 수동 재생성 필요: sudo touch /etc/moly-worker-host
+# 워커 호스트를 옮길 때: 기존 마커 삭제 → 새 호스트 마커 생성 → 양쪽 재배포.
+WORKER_HOST_MARKER="/etc/moly-worker-host"
+if [ -f "$WORKER_HOST_MARKER" ]; then
+  echo "==> 워커 호스트 — systemd 유닛 확인"
+  units_changed=0
+  for unit in moly-worker.service moly-worker.timer; do
+    src="$SCRIPT_DIR/systemd/$unit"
+    dst="/etc/systemd/system/$unit"
+    if [ ! -f "$src" ]; then
+      echo "ERROR: 유닛 원본 없음: $src" >&2
+      exit 1
+    fi
+    if ! cmp -s "$src" "$dst" 2>/dev/null; then
+      install -m 644 "$src" "$dst"
+      units_changed=1
+      echo "  - $unit 설치/갱신"
+    fi
+  done
+  if [ "$units_changed" -eq 1 ]; then
+    systemctl daemon-reload
+  fi
+  # enable --now 는 멱등 — 이미 활성화돼 있으면 no-op (실패 시 stderr 그대로 노출)
+  systemctl enable --now moly-worker.timer >/dev/null
+  echo "  - moly-worker.timer 활성 ($(systemctl is-active moly-worker.timer))"
+else
+  echo "==> 워커 호스트 아님 — 타이머 비활성 보장"
+  systemctl disable --now moly-worker.timer >/dev/null 2>&1 || true
+fi
 
 # ---------------------------------------------------------------------------
 # 8. dangling/오래된 이미지 정리
 # ---------------------------------------------------------------------------
-echo "==> dangling 이미지 정리"
+# sha 태그 고정 후엔 과거 이미지가 태그를 달고 영구 잔존한다(prune -f는 dangling 전용이라
+# 아무것도 못 지움) — 방치하면 배포 10~15회에 디스크 풀. 최근 3개만 남기고 제거한다.
+echo "==> 오래된 이미지 정리 (moly-backend 최근 3개 유지)"
 docker image prune -f
+docker images --format '{{.Repository}}:{{.Tag}}\t{{.CreatedAt}}' \
+  | grep '/moly-backend:' | grep -v ':latest' | sort -t"$(printf '\t')" -k2 -r \
+  | tail -n +4 | cut -f1 | xargs -r docker rmi >/dev/null 2>&1 || true
 
 # ---------------------------------------------------------------------------
 # 9. 상태 출력
 # ---------------------------------------------------------------------------
 echo "==> 현재 상태"
-docker compose -f "$COMPOSE_FILE" ps
+docker compose --env-file "$COMPOSE_ENV_FILE" -f "$COMPOSE_FILE" ps
 
 echo "==> moly-backend 배포 완료"

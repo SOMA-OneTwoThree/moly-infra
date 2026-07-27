@@ -8,7 +8,8 @@ After=docker.service network-online.target
 [Service]
 Type=oneshot
 WorkingDirectory=/root/moly-infra
-ExecStart=/usr/bin/docker compose -f /root/moly-infra/docker-compose.yml run --rm --quiet-pull worker
+# --env-file 명시: IMAGE_TAG(.env)를 cwd 탐색에 안 맡긴다 — 실패 시 무음 :latest 폴백 방지
+ExecStart=/usr/bin/docker compose --env-file /root/moly-infra/.env -f /root/moly-infra/docker-compose.yml run --rm --quiet-pull worker
 # 15분 케이던스 — 다음 틱 전에 끝나도록 상한을 낮춘다. 초과 시 systemd가 종료하지만 워커는
 # 멱등(SOMA-373 claim + _diary_exists)이라 다음 틱이 이어받는다. Type=oneshot이라 실행 중이면
 # 다음 트리거는 자동 스킵(프로세스 중복 없음) + DB claim이 크로스프로세스 백스톱.
