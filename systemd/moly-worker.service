@@ -1,7 +1,7 @@
-# moly 배치 워커 — 1틱 실행 후 종료(멱등). moly-worker.timer가 매시 정각 트리거.
+# moly 배치 워커 — 1틱 실행 후 종료(멱등). moly-worker.timer가 15분마다 트리거.
 # 이 파일은 moly-infra/systemd/ 가 원본이며, deploy.sh가 /etc/systemd/system/ 에 설치/갱신한다.
 [Unit]
-Description=Moly batch worker tick (diary/push, hourly)
+Description=Moly batch worker tick (diary/push, every 15 min)
 Requires=docker.service
 After=docker.service network-online.target
 
@@ -10,5 +10,7 @@ Type=oneshot
 WorkingDirectory=/root/moly-infra
 # --env-file 명시: IMAGE_TAG(.env)를 cwd 탐색에 안 맡긴다 — 실패 시 무음 :latest 폴백 방지
 ExecStart=/usr/bin/docker compose --env-file /root/moly-infra/.env -f /root/moly-infra/docker-compose.yml run --rm --quiet-pull worker
-# LLM 일기 생성이 유저 수에 비례해 길어질 수 있음 — 다음 정각 전엔 끝나야 하므로 50분 상한
-TimeoutStartSec=50min
+# 15분 케이던스 — 다음 틱 전에 끝나도록 상한을 낮춘다. 초과 시 systemd가 종료하지만 워커는
+# 멱등(SOMA-373 claim + _diary_exists)이라 다음 틱이 이어받는다. Type=oneshot이라 실행 중이면
+# 다음 트리거는 자동 스킵(프로세스 중복 없음) + DB claim이 크로스프로세스 백스톱.
+TimeoutStartSec=14min

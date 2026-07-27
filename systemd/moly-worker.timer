@@ -1,10 +1,11 @@
-# 매시 정각에 moly-worker.service 실행. deploy.sh가 설치/enable 한다.
-# 워커 틱은 "유저 로컬시각의 hour"로 판단하므로 정각 직후 실행이 중요 (OnCalendar=hourly = *:00:00).
+# 15분마다 moly-worker.service 실행(매시 :00·:15·:30·:45). deploy.sh가 설치/enable 한다.
+# 워커 틱은 "유저 로컬시각의 hour"로 판단한다. 정각 오프셋 tz(인도 +5:30·네팔 +5:45)는 현지
+# 04/09/20시가 UTC :30·:45에 걸려 매시(hourly)로는 30~45분 늦게 처리된다 → 15분 케이던스로 정시화(SOMA-348).
 [Unit]
-Description=Run Moly batch worker every hour on the hour
+Description=Run Moly batch worker every 15 minutes
 
 [Timer]
-OnCalendar=hourly
+OnCalendar=*:00,15,30,45
 # 재부팅 등으로 놓친 틱은 부팅 후 1회 즉시 실행 — 틱이 "현재 시각" 기준 멱등이라 안전
 Persistent=true
 # 정각 정확도 유지 (기본 1min이면 최대 1분 지연 — 허용 범위지만 명시)
