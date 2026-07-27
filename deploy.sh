@@ -24,12 +24,13 @@ FCM_FILE="$SECRETS_DIR/fcm-service-account.json"
 # compose가 이 .env를 읽는다(:latest 고정 소비 중단 — 2대가 다른 시점에 pull해도 같은 빌드 보장).
 IMAGE_TAG="${1:-}"
 COMPOSE_ENV_FILE="$SCRIPT_DIR/.env"
-if [ -n "$IMAGE_TAG" ]; then
-  echo "IMAGE_TAG=$IMAGE_TAG" > "$COMPOSE_ENV_FILE"
-elif [ ! -f "$COMPOSE_ENV_FILE" ]; then
-  echo "IMAGE_TAG=latest" > "$COMPOSE_ENV_FILE"
+if [ -z "$IMAGE_TAG" ] && [ -f "$COMPOSE_ENV_FILE" ]; then
+  IMAGE_TAG="$(sed -n 's/^IMAGE_TAG=//p' "$COMPOSE_ENV_FILE")"
 fi
-echo "==> 배포 태그: $(cat "$COMPOSE_ENV_FILE")"
+IMAGE_TAG="${IMAGE_TAG:-latest}"
+# 주의: .env 파일 쓰기는 ECR 로그인 뒤로 미룬다(§2 직후) — 워커 타이머(moly-worker.service)가
+# 틱 시작 시점에 .env를 읽으므로, "새 sha는 적혔는데 ECR 자격이 만료된" 창을 없애기 위함.
+echo "==> 배포 태그: IMAGE_TAG=$IMAGE_TAG"
 
 echo "==> moly-backend 배포 시작 (region=$REGION, account=$ACCOUNT_ID)"
 
@@ -59,6 +60,12 @@ fi
 echo "==> ECR 로그인"
 aws ecr get-login-password --region "$REGION" \
   | docker login --username AWS --password-stdin "$ECR_REGISTRY"
+
+# .env 원자적 갱신(tmp + mv) — 워커 타이머가 임의 시점에 이 파일을 읽는다.
+# truncate-후-쓰기(>)는 반쪽 읽기 창을 만들고, ECR 로그인 전에 쓰면 "새 sha인데 pull 인증
+# 실패" 창이 생긴다(교차검증 이슈 #15). rename은 같은 FS에서 원자적이라 둘 다 제거된다.
+printf 'IMAGE_TAG=%s\n' "$IMAGE_TAG" > "$COMPOSE_ENV_FILE.tmp"
+mv "$COMPOSE_ENV_FILE.tmp" "$COMPOSE_ENV_FILE"
 
 # ---------------------------------------------------------------------------
 # 3. SSM Parameter Store에서 파라미터 조회 (복호화)
@@ -118,7 +125,9 @@ umask 077
 # 모니터링(SOMA-301): SLACK_ALERT/STATUS_WEBHOOK_URL(severity 라우팅)·HEALTH_TOKEN(deep/synthetic
 # 인증)·WORKER_PING_URL(Healthchecks 데드맨). 전부 옵션(:-) — 미설정 시 알림 no-op/폴백.
 # 여기 나열 안 하면 SSM에 있어도 컨테이너까지 안 감(backend.env는 명시 나열만 싣는다).
-cat > "$SCRIPT_DIR/backend.env" <<EOF
+# 원자적 쓰기(tmp + mv): 워커 타이머의 docker compose run이 임의 시점에 이 파일을 읽는다 —
+# truncate 직후 반쪽 파일을 읽으면 DB 연결 문자열 없는 워커가 뜬다(교차검증 이슈 #15).
+cat > "$SCRIPT_DIR/backend.env.tmp" <<EOF
 ENVIRONMENT=production
 REVENUECAT_WEBHOOK_AUTH=${PARAMS[revenuecat-webhook-auth]}
 SUPABASE_URL=${PARAMS[supabase-url]}
@@ -135,7 +144,8 @@ WORKER_PING_URL=${PARAMS[worker-ping-url]:-}
 FCM_PROJECT_ID=${PARAMS[fcm-project-id]:-}
 FCM_SERVICE_ACCOUNT_FILE=/secrets/fcm-service-account.json
 EOF
-chmod 600 "$SCRIPT_DIR/backend.env"
+chmod 600 "$SCRIPT_DIR/backend.env.tmp"
+mv "$SCRIPT_DIR/backend.env.tmp" "$SCRIPT_DIR/backend.env"
 
 # FCM 서비스 계정 JSON — SSM SecureString(여러 줄) → 파일.
 # 컨테이너는 비루트(appuser)로 돌아 파일에 other-read가 필요하다.
