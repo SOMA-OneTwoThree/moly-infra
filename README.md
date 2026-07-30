@@ -10,7 +10,7 @@ ECR 이미지를 받아 EC2(Ubuntu 24.04, ap-northeast-2)에서 **moly-backend**
 
 | 파일 | 역할 |
 |------|------|
-| `docker-compose.yml` | `backend`(API, 127.0.0.1:8000) + `worker`(배치, profiles로 상주 안 함). 이미지는 `.env`의 `IMAGE_TAG`(git-sha)로 고정 |
+| `docker-compose.yml` | `backend`(API, 127.0.0.1:8000) + `worker`(배치, profiles로 상주 안 함). 이미지는 `.env`의 `IMAGE_TAG`(git-sha)·`IMAGE_REPO`(환경별 ECR 레포)로 고정 |
 | `deploy.sh` | EC2에서 실행: `bash deploy.sh <git-sha>` — ECR 로그인 → SSM 시크릿 조회 → `backend.env`/FCM 파일 생성 → pull → up → 게이트 → 워커 systemd 유닛(워커 호스트만) |
 | `systemd/moly-worker.{service,timer}` | 배치 워커 매시 정각 1틱 (`docker compose run --rm worker`) — **워커 호스트에서만 활성** |
 | `nginx/voice.moly.asia.conf` | EIP 직결 경로 참조본 (443 → 127.0.0.1:8000, LE 인증서 — DNS 롤백 경로로 유지) |
@@ -20,7 +20,7 @@ ECR 이미지를 받아 EC2(Ubuntu 24.04, ap-northeast-2)에서 **moly-backend**
 - `worker`: 상주하지 않음. `moly-worker.timer`가 매시 정각 `docker compose run --rm worker` 실행(멱등 1틱)
 - **워커 단일 호스트 규칙**: `/etc/moly-worker-host` 마커가 있는 인스턴스에서만 deploy.sh가 타이머를 설치/활성하고, 없는 호스트에선 비활성화한다. 두 대에서 동시 실행되면 매시 틱 2회 = LLM 일기 비용 2배 + 허위 알림. **호스트 재구축(AMI 복원 등) 시 마커를 수동 재생성해야 한다** (`sudo touch /etc/moly-worker-host`). 워커 호스트 이동: 기존 마커 삭제 → 새 호스트 마커 생성 → 양쪽 재배포
 - **환경 마커** (개발서버 전용): `/etc/moly-env`에 `dev`가 적힌 호스트는 deploy.sh가 SSM `/moly/dev/`를 읽는다. **prod 호스트에는 이 파일을 만들지 않는다** (없음 = prod, 기존 동작). 워커 마커와 달리 **내용이 필요** — `sudo touch`로 만들면 빈 값으로 배포가 즉시 실패한다. dev 호스트 재구축 시 재생성: `echo dev | sudo tee /etc/moly-env`. 상세: `docs/DEV-SERVER.md`
-- 이미지 태그: GH Actions가 `deploy.sh <git-sha>`로 넘기고 `.env`(IMAGE_TAG)에 기록된다. 인자 없이 재실행하면 마지막 태그 재사용(멱등). `:latest`는 소비하지 않는다
+- 이미지 태그: GH Actions가 `deploy.sh <git-sha>`로 넘기고 `.env`(IMAGE_TAG·IMAGE_REPO)에 기록된다. `IMAGE_REPO`는 환경 마커에 따라 deploy.sh가 결정 — prod `moly-backend` / dev `moly-backend-dev`. 인자 없이 재실행하면 마지막 태그 재사용(멱등). `:latest`는 소비하지 않는다
 - `backend.env` / `secrets/fcm-service-account.json` / `.env` 는 `deploy.sh`가 런타임에 생성하며 git에 커밋하지 않는다
 
 ## 배포
