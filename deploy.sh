@@ -19,14 +19,23 @@ COMPOSE_FILE="$SCRIPT_DIR/docker-compose.yml"
 # 환경 판별 — /etc/moly-env 마커 파일(개발서버 전용). 마커가 없으면 prod이므로
 # 기존 prod 호스트는 이 변경 전과 동일하게 동작한다(마커 생성 전까지 무영향).
 # dev 인스턴스는 셋업 시 1회: echo dev | sudo tee /etc/moly-env
+# "호스트가 자기 역할을 안다"는 점은 워커 마커(/etc/moly-worker-host)와 같은 패턴이라
+# 배포 호출부(GH Actions)는 환경을 몰라도 된다. 단, 워커 마커(존재만 확인)와 달리
+# 이 마커는 **내용(prod|dev)이 필요하다** — sudo touch로 만들면 빈 값으로 즉시 실패한다.
 # 값은 화이트리스트로 검증 — 오타가 "빈 SSM 경로 → 필수 키 누락"으로 늦게 터지는 대신
-# 원인(마커 값)을 그대로 보고하며 즉시 실패한다. 워커 마커(/etc/moly-worker-host)와
-# 같은 "호스트가 자기 역할을 안다" 패턴이라, 배포 호출부(GH Actions)는 환경을 몰라도 된다.
-ENV_NAME="$(cat /etc/moly-env 2>/dev/null || echo prod)"
+# 원인(마커 값)을 그대로 보고하며 즉시 실패한다(CRLF 등 제어문자는 %q로 가시화).
+if [ -e /etc/moly-env ]; then
+  # 존재하는 마커는 반드시 읽혀야 한다 — 읽기 실패(권한/디렉터리/PATH 붕괴)를 조용한
+  # prod 폴백으로 접지 않고 set -e로 즉시 중단한다. "없음 = prod"와 "있는데 못 읽음 =
+  # 사고"의 구분: dev 호스트에서 조용히 prod 시크릿을 읽는 경로를 스크립트 단에서 차단.
+  ENV_NAME="$(cat /etc/moly-env)"
+else
+  ENV_NAME="prod"
+fi
 case "$ENV_NAME" in
   prod) APP_ENV="production" ;;
   dev)  APP_ENV="development" ;;
-  *) echo "ERROR: /etc/moly-env 값이 prod|dev 가 아닙니다: '$ENV_NAME'" >&2; exit 1 ;;
+  *) printf "ERROR: /etc/moly-env 값이 prod|dev 가 아닙니다: %q\n" "$ENV_NAME" >&2; exit 1 ;;
 esac
 SSM_PATH="/moly/${ENV_NAME}/"
 SECRETS_DIR="$SCRIPT_DIR/secrets"
