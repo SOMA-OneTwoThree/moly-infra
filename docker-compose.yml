@@ -1,8 +1,10 @@
 services:
   backend:
-    # IMAGE_TAG는 deploy.sh가 생성하는 .env에서 온다(git-sha 고정). :latest 폴백은
-    # 첫 수동 기동용 — 평시엔 deploy.sh가 항상 .env를 만들어 둔다.
-    image: 676972757138.dkr.ecr.ap-northeast-2.amazonaws.com/moly-backend:${IMAGE_TAG:-latest}
+    # IMAGE_TAG/IMAGE_REPO는 deploy.sh가 생성하는 .env에서 온다(git-sha 고정).
+    # IMAGE_REPO 기본값 moly-backend = prod — IMAGE_REPO 줄이 없는 구 .env로도 prod가
+    # 기존과 동일하게 뜬다. dev 호스트만 deploy.sh가 moly-backend-dev를 써 넣는다.
+    # :latest 폴백은 첫 수동 기동용 — 평시엔 deploy.sh가 항상 .env를 만들어 둔다.
+    image: 676972757138.dkr.ecr.ap-northeast-2.amazonaws.com/${IMAGE_REPO:-moly-backend}:${IMAGE_TAG:-latest}
     container_name: moly-backend
     ports:
       - "127.0.0.1:8000:8000"   # 루프백만 바인딩 — 외부는 nginx(443)를 통해서만
@@ -30,7 +32,7 @@ services:
   # `docker compose run --rm worker`로 1틱 실행(멱등). profiles 덕분에
   # `up -d`로는 안 뜨고, run으로만 실행된다.
   worker:
-    image: 676972757138.dkr.ecr.ap-northeast-2.amazonaws.com/moly-backend:${IMAGE_TAG:-latest}
+    image: 676972757138.dkr.ecr.ap-northeast-2.amazonaws.com/${IMAGE_REPO:-moly-backend}:${IMAGE_TAG:-latest}
     profiles: ["worker"]
     command: ["python", "-m", "worker"]
     env_file:

@@ -33,8 +33,8 @@ else
   ENV_NAME="prod"
 fi
 case "$ENV_NAME" in
-  prod) APP_ENV="production" ;;
-  dev)  APP_ENV="development" ;;
+  prod) APP_ENV="production";  IMAGE_REPO="moly-backend" ;;
+  dev)  APP_ENV="development"; IMAGE_REPO="moly-backend-dev" ;;
   *) printf "ERROR: /etc/moly-env 값이 prod|dev 가 아닙니다: %q\n" "$ENV_NAME" >&2; exit 1 ;;
 esac
 SSM_PATH="/moly/${ENV_NAME}/"
@@ -86,7 +86,9 @@ aws ecr get-login-password --region "$REGION" \
 # .env 원자적 갱신(tmp + mv) — 워커 타이머가 임의 시점에 이 파일을 읽는다.
 # truncate-후-쓰기(>)는 반쪽 읽기 창을 만들고, ECR 로그인 전에 쓰면 "새 sha인데 pull 인증
 # 실패" 창이 생긴다(교차검증 이슈 #15). rename은 같은 FS에서 원자적이라 둘 다 제거된다.
-printf 'IMAGE_TAG=%s\n' "$IMAGE_TAG" > "$COMPOSE_ENV_FILE.tmp"
+# IMAGE_REPO도 함께 기록 — compose가 환경별 ECR 레포를 고른다(prod=moly-backend,
+# dev=moly-backend-dev). compose 쪽 기본값이 moly-backend라 prod는 이 줄이 없어도 동일.
+printf 'IMAGE_TAG=%s\nIMAGE_REPO=%s\n' "$IMAGE_TAG" "$IMAGE_REPO" > "$COMPOSE_ENV_FILE.tmp"
 mv "$COMPOSE_ENV_FILE.tmp" "$COMPOSE_ENV_FILE"
 
 # ---------------------------------------------------------------------------
@@ -305,10 +307,12 @@ fi
 # ---------------------------------------------------------------------------
 # sha 태그 고정 후엔 과거 이미지가 태그를 달고 영구 잔존한다(prune -f는 dangling 전용이라
 # 아무것도 못 지움) — 방치하면 배포 10~15회에 디스크 풀. 최근 3개만 남기고 제거한다.
-echo "==> 오래된 이미지 정리 (moly-backend 최근 3개 유지)"
+echo "==> 오래된 이미지 정리 (${IMAGE_REPO} 최근 3개 유지)"
 docker image prune -f
+# 레포 경계는 콜론 포함 매칭("/repo:")으로 — dev 호스트에서 /moly-backend: 패턴을 쓰면
+# moly-backend-dev: 이미지가 안 걸려 영구 잔존, 배포 누적으로 디스크 풀이 난다.
 docker images --format '{{.Repository}}:{{.Tag}}\t{{.CreatedAt}}' \
-  | grep '/moly-backend:' | grep -v ':latest' | sort -t"$(printf '\t')" -k2 -r \
+  | grep "/${IMAGE_REPO}:" | grep -v ':latest' | sort -t"$(printf '\t')" -k2 -r \
   | tail -n +4 | cut -f1 | xargs -r docker rmi >/dev/null 2>&1 || true
 
 # ---------------------------------------------------------------------------
