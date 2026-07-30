@@ -15,7 +15,20 @@ ACCOUNT_ID="676972757138"
 ECR_REGISTRY="676972757138.dkr.ecr.ap-northeast-2.amazonaws.com"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 COMPOSE_FILE="$SCRIPT_DIR/docker-compose.yml"
-SSM_PATH="/moly/prod/"
+
+# 환경 판별 — /etc/moly-env 마커 파일(개발서버 전용). 마커가 없으면 prod이므로
+# 기존 prod 호스트는 이 변경 전과 동일하게 동작한다(마커 생성 전까지 무영향).
+# dev 인스턴스는 셋업 시 1회: echo dev | sudo tee /etc/moly-env
+# 값은 화이트리스트로 검증 — 오타가 "빈 SSM 경로 → 필수 키 누락"으로 늦게 터지는 대신
+# 원인(마커 값)을 그대로 보고하며 즉시 실패한다. 워커 마커(/etc/moly-worker-host)와
+# 같은 "호스트가 자기 역할을 안다" 패턴이라, 배포 호출부(GH Actions)는 환경을 몰라도 된다.
+ENV_NAME="$(cat /etc/moly-env 2>/dev/null || echo prod)"
+case "$ENV_NAME" in
+  prod) APP_ENV="production" ;;
+  dev)  APP_ENV="development" ;;
+  *) echo "ERROR: /etc/moly-env 값이 prod|dev 가 아닙니다: '$ENV_NAME'" >&2; exit 1 ;;
+esac
+SSM_PATH="/moly/${ENV_NAME}/"
 SECRETS_DIR="$SCRIPT_DIR/secrets"
 FCM_FILE="$SECRETS_DIR/fcm-service-account.json"
 
@@ -32,7 +45,7 @@ IMAGE_TAG="${IMAGE_TAG:-latest}"
 # 틱 시작 시점에 .env를 읽으므로, "새 sha는 적혔는데 ECR 자격이 만료된" 창을 없애기 위함.
 echo "==> 배포 태그: IMAGE_TAG=$IMAGE_TAG"
 
-echo "==> moly-backend 배포 시작 (region=$REGION, account=$ACCOUNT_ID)"
+echo "==> moly-backend 배포 시작 (region=$REGION, account=$ACCOUNT_ID, env=$ENV_NAME)"
 
 # 의존성 확인
 for bin in docker aws jq curl; do
@@ -128,7 +141,7 @@ umask 077
 # 원자적 쓰기(tmp + mv): 워커 타이머의 docker compose run이 임의 시점에 이 파일을 읽는다 —
 # truncate 직후 반쪽 파일을 읽으면 DB 연결 문자열 없는 워커가 뜬다(교차검증 이슈 #15).
 cat > "$SCRIPT_DIR/backend.env.tmp" <<EOF
-ENVIRONMENT=production
+ENVIRONMENT=${APP_ENV}
 REVENUECAT_WEBHOOK_AUTH=${PARAMS[revenuecat-webhook-auth]}
 SUPABASE_URL=${PARAMS[supabase-url]}
 SUPABASE_ANON_KEY=${PARAMS[supabase-anon-key]}
@@ -155,7 +168,7 @@ chmod 700 "$SECRETS_DIR"
 if [ -n "${PARAMS[fcm-service-account]+x}" ] && [ -n "${PARAMS[fcm-service-account]}" ]; then
   printf '%s' "${PARAMS[fcm-service-account]}" > "$FCM_FILE"
 else
-  echo "WARN: /moly/prod/fcm-service-account 미설정 — FCM 푸시 비활성 (빈 파일로 대체)" >&2
+  echo "WARN: ${SSM_PATH}fcm-service-account 미설정 — FCM 푸시 비활성 (빈 파일로 대체)" >&2
   : > "$FCM_FILE"
 fi
 chmod 644 "$FCM_FILE"
