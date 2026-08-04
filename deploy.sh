@@ -216,6 +216,14 @@ docker compose --env-file "$COMPOSE_ENV_FILE" -f "$COMPOSE_FILE" pull
 echo "==> 컨테이너 기동"
 docker compose --env-file "$COMPOSE_ENV_FILE" -f "$COMPOSE_FILE" up -d
 
+# 신규 대화 후속 잡 consumer는 개발 환경에서만 상주 기동한다. 같은 sha 이미지와 backend.env를
+# 사용하며, compose가 태그 변경을 감지해 dev 배포마다 필요한 경우 재생성한다.
+if [ "$ENV_NAME" = "dev" ]; then
+  echo "==> dev async job consumer 기동"
+  docker compose --env-file "$COMPOSE_ENV_FILE" -f "$COMPOSE_FILE" \
+    --profile consumer up -d consumer
+fi
+
 # 설정만 바뀐 서비스는 compose가 못 잡을 수 있으므로 해당 서비스만 강제 재생성한다.
 if [ "${#RECREATE[@]}" -gt 0 ]; then
   echo "==> 설정 변경 감지: ${RECREATE[*]} 재생성"
@@ -258,6 +266,16 @@ case "$RUNNING_IMAGE" in
   *:"$EXPECTED_TAG") echo "  - 이미지 태그 일치: $RUNNING_IMAGE" ;;
   *) echo "ERROR: 기대 태그 '$EXPECTED_TAG', 실제 '$RUNNING_IMAGE'" >&2; exit 1 ;;
 esac
+
+if [ "$ENV_NAME" = "dev" ]; then
+  CONSUMER_STATE="$(docker inspect --format '{{.State.Status}}' moly-consumer 2>/dev/null || true)"
+  if [ "$CONSUMER_STATE" != "running" ]; then
+    echo "ERROR: dev async job consumer가 running이 아님 (state=${CONSUMER_STATE:-missing})" >&2
+    docker logs --tail 50 moly-consumer >&2 || true
+    exit 1
+  fi
+  echo "  - dev async job consumer running"
+fi
 
 # ALB 경로(nginx :8080 → 8000) 확인 — nginx 블록은 수동 반영이라 여기가 유일한
 # 드리프트 감지 지점. 심링크 누락/reload 실패를 register 전에 즉시 잡는다.

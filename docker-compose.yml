@@ -45,3 +45,21 @@ services:
       options:
         max-size: "10m"
         max-file: "3"
+
+  # 대화 후속 잡(memory/profile/checkpoint)을 처리하는 상주 consumer.
+  # dev에서만 deploy.sh가 consumer profile을 켜서 기동한다. prod는 별도 전환 전까지 미기동.
+  consumer:
+    image: 676972757138.dkr.ecr.ap-northeast-2.amazonaws.com/${IMAGE_REPO:-moly-backend}:${IMAGE_TAG:-latest}
+    container_name: moly-consumer
+    profiles: ["consumer"]
+    command: ["python", "-m", "worker.consumer"]
+    env_file:
+      - ./backend.env
+    volumes:
+      - ./secrets/fcm-service-account.json:/secrets/fcm-service-account.json:ro
+    restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
