@@ -168,6 +168,21 @@ WORKER_PING_URL=${PARAMS[worker-ping-url]:-}
 FCM_PROJECT_ID=${PARAMS[fcm-project-id]:-}
 FCM_SERVICE_ACCOUNT_FILE=/secrets/fcm-service-account.json
 EOF
+
+# 격리된 dev 서버는 전체 대화 기능을 Swagger에서 수동 검증하는 환경이다. 운영 SSM 값과
+# 섞지 않고 dev 호스트에서만 명시적으로 켠다. operator UUID는 Dev DB의 수동 검증 계정이며
+# 비용·강제 생성 route를 다른 인증 사용자가 호출하지 못하게 한다.
+if [ "$ENV_NAME" = "dev" ]; then
+  cat >> "$SCRIPT_DIR/backend.env.tmp" <<EOF
+ENABLE_DEV_ROUTES=true
+DEV_OPERATOR_USER_IDS=445bdde0-025b-403a-bab8-7816827016c3
+CURRENT_TURN_CONTEXT_ENABLED=true
+CURRENT_CONTEXT_LAST_ACTIVE_ENABLED=true
+CONTEXT_CHECKPOINT_ENABLED=true
+AGENT_ENABLED=true
+AGENT_CANARY_PCT=100
+EOF
+fi
 chmod 600 "$SCRIPT_DIR/backend.env.tmp"
 mv "$SCRIPT_DIR/backend.env.tmp" "$SCRIPT_DIR/backend.env"
 
