@@ -120,8 +120,9 @@ required_keys=(
   openai-api-key
   supabase-db-connection-string
   supabase-url
-  supabase-anon-key
-  supabase-service-role-key
+  # 신형 API 키(sb_publishable_/sb_secret_) — legacy anon/service_role은 2026-08 유출로 폐기
+  supabase-publishable-key
+  supabase-secret-key
   revenuecat-webhook-auth
 )
 missing=()
@@ -155,8 +156,8 @@ cat > "$SCRIPT_DIR/backend.env.tmp" <<EOF
 ENVIRONMENT=${APP_ENV}
 REVENUECAT_WEBHOOK_AUTH=${PARAMS[revenuecat-webhook-auth]}
 SUPABASE_URL=${PARAMS[supabase-url]}
-SUPABASE_ANON_KEY=${PARAMS[supabase-anon-key]}
-SUPABASE_SERVICE_ROLE_KEY=${PARAMS[supabase-service-role-key]}
+SUPABASE_PUBLISHABLE_KEY=${PARAMS[supabase-publishable-key]}
+SUPABASE_SECRET_KEY=${PARAMS[supabase-secret-key]}
 SUPABASE_DB_CONNECTION_STRING=${PARAMS[supabase-db-connection-string]}
 ANTHROPIC_API_KEY=${PARAMS[anthropic-api-key]}
 OPENAI_API_KEY=${PARAMS[openai-api-key]}
