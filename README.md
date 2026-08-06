@@ -52,8 +52,9 @@ SSM Parameter Store `/moly/prod/` 에서 런타임에 조회한다 (`/etc/moly-e
 개발서버는 `/moly/dev/`). AWS 인증은 EC2 인스턴스
 IAM 역할로 처리되며 자격증명을 레포/스크립트에 두지 않는다.
 
-필수: `anthropic-api-key`, `openai-api-key`, `supabase-url`, `supabase-anon-key`,
-`supabase-service-role-key`, `supabase-db-connection-string`
+필수: `anthropic-api-key`, `openai-api-key`, `supabase-url`, `supabase-publishable-key`,
+`supabase-secret-key`, `supabase-db-connection-string`
+(legacy `supabase-anon-key`/`supabase-service-role-key`는 2026-08 키 유출로 폐기)
 옵션: `fcm-project-id`, `fcm-service-account`(여러 줄 JSON — 파일로 생성돼 컨테이너에 마운트, 없으면 푸시만 비활성)
 
 새 시크릿 추가 시: 파라미터 생성(`/moly/prod/<소문자-하이픈>`) + `deploy.sh`의 env 매핑에 한 줄 추가.
