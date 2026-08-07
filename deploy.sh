@@ -152,6 +152,10 @@ umask 077
 # 여기 나열 안 하면 SSM에 있어도 컨테이너까지 안 감(backend.env는 명시 나열만 싣는다).
 # 원자적 쓰기(tmp + mv): 워커 타이머의 docker compose run이 임의 시점에 이 파일을 읽는다 —
 # truncate 직후 반쪽 파일을 읽으면 DB 연결 문자열 없는 워커가 뜬다(교차검증 이슈 #15).
+# 대화 기능 플래그(CURRENT_TURN_CONTEXT·CONTEXT_CHECKPOINT·AGENT)는 dev 전용이었으나
+# 운영에서도 켠다. dev에서 실제로 돌려 검증했고(conversation_checkpoints·relationship_events에
+# 기록 있음), 새 구조 전환과 함께 올린다. 아침 푸시(MORNING_PUSH_ENABLED)는 SOMA-338 결정대로
+# 계속 끈 상태를 유지한다 — 코드 기본값이 false다.
 cat > "$SCRIPT_DIR/backend.env.tmp" <<EOF
 ENVIRONMENT=${APP_ENV}
 REVENUECAT_WEBHOOK_AUTH=${PARAMS[revenuecat-webhook-auth]}
@@ -168,20 +172,20 @@ HEALTH_TOKEN=${PARAMS[health-token]:-}
 WORKER_PING_URL=${PARAMS[worker-ping-url]:-}
 FCM_PROJECT_ID=${PARAMS[fcm-project-id]:-}
 FCM_SERVICE_ACCOUNT_FILE=/secrets/fcm-service-account.json
-EOF
-
-# 격리된 dev 서버는 전체 대화 기능을 Swagger에서 수동 검증하는 환경이다. 운영 SSM 값과
-# 섞지 않고 dev 호스트에서만 명시적으로 켠다. operator UUID는 Dev DB의 수동 검증 계정이며
-# 비용·강제 생성 route를 다른 인증 사용자가 호출하지 못하게 한다.
-if [ "$ENV_NAME" = "dev" ]; then
-  cat >> "$SCRIPT_DIR/backend.env.tmp" <<EOF
-ENABLE_DEV_ROUTES=true
-DEV_OPERATOR_USER_IDS=445bdde0-025b-403a-bab8-7816827016c3
 CURRENT_TURN_CONTEXT_ENABLED=true
 CURRENT_CONTEXT_LAST_ACTIVE_ENABLED=true
 CONTEXT_CHECKPOINT_ENABLED=true
 AGENT_ENABLED=true
 AGENT_CANARY_PCT=100
+EOF
+
+# dev 전용 — 운영에 가면 안 되는 것만 남긴다.
+# ENABLE_DEV_ROUTES는 강제 생성·유료 모델 평가 같은 위험 route를 여는 스위치다.
+# DEV_OPERATOR_USER_IDS는 Dev DB의 수동 검증 계정이라 운영에서는 의미가 없다.
+if [ "$ENV_NAME" = "dev" ]; then
+  cat >> "$SCRIPT_DIR/backend.env.tmp" <<EOF
+ENABLE_DEV_ROUTES=true
+DEV_OPERATOR_USER_IDS=445bdde0-025b-403a-bab8-7816827016c3
 EOF
 fi
 chmod 600 "$SCRIPT_DIR/backend.env.tmp"
