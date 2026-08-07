@@ -46,8 +46,10 @@ services:
         max-size: "10m"
         max-file: "3"
 
-  # 대화 후속 잡(memory/profile/checkpoint)을 처리하는 상주 consumer.
-  # dev에서만 deploy.sh가 consumer profile을 켜서 기동한다. prod는 별도 전환 전까지 미기동.
+  # 대화 후속 잡(기억·일기 색인·약속·관계·요약)을 처리하는 상주 consumer.
+  # deploy.sh가 dev·prod 모두에서 consumer profile을 켜서 기동한다. 운영 EC2 두 대에서 동시에
+  # 떠도 잡을 나눠 갖는다(FOR UPDATE SKIP LOCKED) — 워커 틱과 달리 단일 호스트 제한이 없다.
+  # 이미지에 worker.consumer가 없으면(롤백 등) deploy.sh가 기동을 건너뛴다.
   consumer:
     image: 676972757138.dkr.ecr.ap-northeast-2.amazonaws.com/${IMAGE_REPO:-moly-backend}:${IMAGE_TAG:-latest}
     container_name: moly-consumer
