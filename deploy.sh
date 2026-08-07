@@ -152,6 +152,10 @@ umask 077
 # 여기 나열 안 하면 SSM에 있어도 컨테이너까지 안 감(backend.env는 명시 나열만 싣는다).
 # 원자적 쓰기(tmp + mv): 워커 타이머의 docker compose run이 임의 시점에 이 파일을 읽는다 —
 # truncate 직후 반쪽 파일을 읽으면 DB 연결 문자열 없는 워커가 뜬다(교차검증 이슈 #15).
+# 대화 기능 플래그(CURRENT_TURN_CONTEXT·CONTEXT_CHECKPOINT·AGENT)는 dev 전용이었으나
+# 운영에서도 켠다. dev에서 실제로 돌려 검증했고(conversation_checkpoints·relationship_events에
+# 기록 있음), 새 구조 전환과 함께 올린다. 아침 푸시(MORNING_PUSH_ENABLED)는 SOMA-338 결정대로
+# 계속 끈 상태를 유지한다 — 코드 기본값이 false다.
 cat > "$SCRIPT_DIR/backend.env.tmp" <<EOF
 ENVIRONMENT=${APP_ENV}
 REVENUECAT_WEBHOOK_AUTH=${PARAMS[revenuecat-webhook-auth]}
@@ -168,20 +172,20 @@ HEALTH_TOKEN=${PARAMS[health-token]:-}
 WORKER_PING_URL=${PARAMS[worker-ping-url]:-}
 FCM_PROJECT_ID=${PARAMS[fcm-project-id]:-}
 FCM_SERVICE_ACCOUNT_FILE=/secrets/fcm-service-account.json
-EOF
-
-# 격리된 dev 서버는 전체 대화 기능을 Swagger에서 수동 검증하는 환경이다. 운영 SSM 값과
-# 섞지 않고 dev 호스트에서만 명시적으로 켠다. operator UUID는 Dev DB의 수동 검증 계정이며
-# 비용·강제 생성 route를 다른 인증 사용자가 호출하지 못하게 한다.
-if [ "$ENV_NAME" = "dev" ]; then
-  cat >> "$SCRIPT_DIR/backend.env.tmp" <<EOF
-ENABLE_DEV_ROUTES=true
-DEV_OPERATOR_USER_IDS=445bdde0-025b-403a-bab8-7816827016c3
 CURRENT_TURN_CONTEXT_ENABLED=true
 CURRENT_CONTEXT_LAST_ACTIVE_ENABLED=true
 CONTEXT_CHECKPOINT_ENABLED=true
 AGENT_ENABLED=true
 AGENT_CANARY_PCT=100
+EOF
+
+# dev 전용 — 운영에 가면 안 되는 것만 남긴다.
+# ENABLE_DEV_ROUTES는 강제 생성·유료 모델 평가 같은 위험 route를 여는 스위치다.
+# DEV_OPERATOR_USER_IDS는 Dev DB의 수동 검증 계정이라 운영에서는 의미가 없다.
+if [ "$ENV_NAME" = "dev" ]; then
+  cat >> "$SCRIPT_DIR/backend.env.tmp" <<EOF
+ENABLE_DEV_ROUTES=true
+DEV_OPERATOR_USER_IDS=445bdde0-025b-403a-bab8-7816827016c3
 EOF
 fi
 chmod 600 "$SCRIPT_DIR/backend.env.tmp"
@@ -232,12 +236,45 @@ docker compose --env-file "$COMPOSE_ENV_FILE" -f "$COMPOSE_FILE" pull
 echo "==> 컨테이너 기동"
 docker compose --env-file "$COMPOSE_ENV_FILE" -f "$COMPOSE_FILE" up -d
 
-# 신규 대화 후속 잡 consumer는 개발 환경에서만 상주 기동한다. 같은 sha 이미지와 backend.env를
-# 사용하며, compose가 태그 변경을 감지해 dev 배포마다 필요한 경우 재생성한다.
-if [ "$ENV_NAME" = "dev" ]; then
-  echo "==> dev async job consumer 기동"
+# 대화 후속 잡 consumer는 dev·prod 모두 상주 기동한다. 같은 sha 이미지와 backend.env를 쓰고,
+# compose가 태그 변경을 감지해 배포마다 필요한 경우 재생성한다.
+#
+# 운영 EC2 두 대에서 동시에 떠도 같은 잡을 두 번 처리하지 않는다 — 잡을 집어갈 때
+# `FOR UPDATE SKIP LOCKED`를 써서 한쪽이 잠근 행은 다른 쪽이 건너뛴다. 그래서 워커 틱과 달리
+# 단일 호스트 마커(/etc/moly-worker-host)를 쓰지 않는다. 워커 틱은 대상 유저를 스스로 정해서
+# 두 대가 같은 일을 하지만, consumer는 표에 적힌 행을 나눠 갖는다.
+#
+# 구 이미지 안전장치: 롤백으로 `worker.consumer`가 없는 이미지가 배포되면 컨테이너가 즉시 죽어
+# 아래 배포 게이트가 막힌다 — 롤백 자체가 불가능해진다. 모듈이 없으면 consumer를 건너뛰고
+# 배포는 계속한다. 구 이미지에는 애초에 이 잡들을 만드는 코드도 없다.
+CONSUMER_IMAGE="$ECR_REGISTRY/$IMAGE_REPO:$IMAGE_TAG"
+CONSUMER_STARTED=0
+echo "==> async job consumer 모듈 확인"
+if docker run --rm --entrypoint python "$CONSUMER_IMAGE" \
+     -c "import importlib.util,sys; sys.exit(0 if importlib.util.find_spec('worker.consumer') else 3)"; then
+  # 모듈이 있으면 핸들러 등록까지 확인한다. registry가 비면 consumer는 살아서 모든 잡을
+  # unknown으로 죽인다 — 조용히 도는 대신 여기서 배포를 세운다.
+  echo "==> consumer 핸들러 등록 확인"
+  docker run --rm --env-file "$SCRIPT_DIR/backend.env" \
+    -e MOLY_CONSUMER_STARTUP_CHECK_ONLY=1 \
+    -v "$FCM_FILE":/secrets/fcm-service-account.json:ro \
+    --entrypoint python "$CONSUMER_IMAGE" -m worker.consumer
+
+  echo "==> async job consumer 기동"
   docker compose --env-file "$COMPOSE_ENV_FILE" -f "$COMPOSE_FILE" \
     --profile consumer up -d consumer
+  CONSUMER_STARTED=1
+else
+  consumer_rc=$?
+  if [ "$consumer_rc" -eq 3 ]; then
+    echo "WARN: 이 이미지에 worker.consumer가 없다(구 버전) — consumer 건너뜀." >&2
+    echo "      대화 후속 잡(기억·일기 색인·약속·관계)이 처리되지 않는다." >&2
+    # 새 이미지에서 뜬 consumer가 구 코드 배포 뒤에도 남아 도는 것을 막는다.
+    docker rm -f moly-consumer >/dev/null 2>&1 || true
+  else
+    echo "ERROR: consumer 모듈 확인 실패 (exit=$consumer_rc) — 이미지 pull/실행 문제" >&2
+    exit 1
+  fi
 fi
 
 # 설정만 바뀐 서비스는 compose가 못 잡을 수 있으므로 해당 서비스만 강제 재생성한다.
@@ -283,14 +320,16 @@ case "$RUNNING_IMAGE" in
   *) echo "ERROR: 기대 태그 '$EXPECTED_TAG', 실제 '$RUNNING_IMAGE'" >&2; exit 1 ;;
 esac
 
-if [ "$ENV_NAME" = "dev" ]; then
+# 기동을 건너뛴 경우(구 이미지)에는 검사하지 않는다 — 위에서 이미 경고했고, 여기서 막으면
+# 롤백 배포가 실패한다.
+if [ "$CONSUMER_STARTED" -eq 1 ]; then
   CONSUMER_STATE="$(docker inspect --format '{{.State.Status}}' moly-consumer 2>/dev/null || true)"
   if [ "$CONSUMER_STATE" != "running" ]; then
-    echo "ERROR: dev async job consumer가 running이 아님 (state=${CONSUMER_STATE:-missing})" >&2
+    echo "ERROR: async job consumer가 running이 아님 (state=${CONSUMER_STATE:-missing})" >&2
     docker logs --tail 50 moly-consumer >&2 || true
     exit 1
   fi
-  echo "  - dev async job consumer running"
+  echo "  - async job consumer running"
 fi
 
 # ALB 경로(nginx :8080 → 8000) 확인 — nginx 블록은 수동 반영이라 여기가 유일한
