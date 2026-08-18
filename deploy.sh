@@ -150,6 +150,9 @@ umask 077
 # 모니터링(SOMA-301): SLACK_ALERT/STATUS_WEBHOOK_URL(severity 라우팅)·HEALTH_TOKEN(deep/synthetic
 # 인증)·WORKER_PING_URL(Healthchecks 데드맨). 전부 옵션(:-) — 미설정 시 알림 no-op/폴백.
 # 여기 나열 안 하면 SSM에 있어도 컨테이너까지 안 감(backend.env는 명시 나열만 싣는다).
+# META_INSTALL_REFERRER_DECRYPTION_KEY도 옵션(:-) — Meta 설치 리퍼러 복호화 키(64자 hex).
+# 비면 /attribution/meta-referrer/decrypt 만 503으로 답하고 앱이 다음 실행에서 재시도한다.
+# 다른 기능을 막지 않으므로 required_keys로 올리지 않는다(키 주입 전 배포가 통째로 죽는다).
 # 원자적 쓰기(tmp + mv): 워커 타이머의 docker compose run이 임의 시점에 이 파일을 읽는다 —
 # truncate 직후 반쪽 파일을 읽으면 DB 연결 문자열 없는 워커가 뜬다(교차검증 이슈 #15).
 # 대화 기능 플래그(CURRENT_TURN_CONTEXT·CONTEXT_CHECKPOINT·AGENT)는 dev 전용이었으나
@@ -172,6 +175,7 @@ HEALTH_TOKEN=${PARAMS[health-token]:-}
 WORKER_PING_URL=${PARAMS[worker-ping-url]:-}
 FCM_PROJECT_ID=${PARAMS[fcm-project-id]:-}
 FCM_SERVICE_ACCOUNT_FILE=/secrets/fcm-service-account.json
+META_INSTALL_REFERRER_DECRYPTION_KEY=${PARAMS[meta-install-referrer-decryption-key]:-}
 CURRENT_TURN_CONTEXT_ENABLED=true
 CURRENT_CONTEXT_LAST_ACTIVE_ENABLED=true
 CONTEXT_CHECKPOINT_ENABLED=true
