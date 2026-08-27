@@ -185,11 +185,15 @@ EOF
 
 # dev 전용 — 운영에 가면 안 되는 것만 남긴다.
 # ENABLE_DEV_ROUTES는 강제 생성·유료 모델 평가 같은 위험 route를 여는 스위치다.
+# 오늘의 운세와 운세 대화는 승인 전 dev에서만 실제 API 검증을 위해 켠다.
 # DEV_OPERATOR_USER_IDS는 Dev DB의 수동 검증 계정이라 운영에서는 의미가 없다.
 if [ "$ENV_NAME" = "dev" ]; then
   cat >> "$SCRIPT_DIR/backend.env.tmp" <<EOF
 ENABLE_DEV_ROUTES=true
 DEV_OPERATOR_USER_IDS=445bdde0-025b-403a-bab8-7816827016c3
+FORTUNE_ENABLED=true
+FORTUNE_CHAT_ENABLED=true
+FORTUNE_AD_UNIT_IDS=${PARAMS[fortune-ad-unit-ids]:-}
 EOF
 fi
 chmod 600 "$SCRIPT_DIR/backend.env.tmp"
