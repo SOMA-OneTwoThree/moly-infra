@@ -1,5 +1,7 @@
 .omc/
 .DS_Store
+__pycache__/
+.ruff_cache/
 
 # 런타임 시크릿 — deploy.sh가 SSM에서 생성, 커밋 금지
 backend.env
