@@ -64,13 +64,15 @@ IAM 역할로 처리되며 자격증명을 레포/스크립트에 두지 않는�
 
 필수: `anthropic-api-key`, `openai-api-key`, `supabase-url`, `supabase-publishable-key`,
 `supabase-secret-key`, `supabase-db-connection-string`, `revenuecat-webhook-auth`,
-`fortune-ad-unit-ids`
+`fortune-ad-unit-ids`(prod에서만 필수)
 (legacy `supabase-anon-key`/`supabase-service-role-key`는 2026-08 키 유출로 폐기)
 옵션: `fcm-project-id`, `fcm-service-account`(여러 줄 JSON — 파일로 생성돼 컨테이너에 마운트, 없으면 푸시만 비활성),
 `meta-install-referrer-decryption-key`(64자 hex — 없으면 설치 귀속 복호화 엔드포인트만 503)
 
 `fortune-ad-unit-ids`는 AdMob SSV의 `ad_unit`과 비교할 숫자 ID를 쉼표로 구분한다. 운영값은 iOS
-`3157498952`, Android `2146352961`이며 빈 값이면 운세 광고를 허용하지 않고 배포 자체도 실패한다.
+`3157498952`, Android `2146352961`이다. prod는 누락·빈 값이면 배포가 실패한다.
+dev는 광고 연동 전 누락·빈 값을 허용하며, 빈 allowlist를 전달해 서버의 기존 광고 보상 거부를 유지한다.
+다른 필수 파라미터와 운세 DB preflight는 환경에 관계없이 계속 검증한다.
 
 새 시크릿 추가 시: 파라미터 생성(`/moly/prod/<소문자-하이픈>`) + `deploy.sh`의 env 매핑에 한 줄 추가.
 
