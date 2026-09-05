@@ -37,10 +37,15 @@ cd /root/moly-infra && git pull --ff-only && bash deploy.sh
 
 멱등이라 여러 번 실행해도 안전하다.
 
-운세 플래그를 활성화하는 infra 변경은 운영 DB 마이그레이션을 먼저 끝낸 뒤 머지하고, 검증한
-backend `main` SHA를 명시해 배포를 다시 실행한다. `scripts/verify_fortune_schema.py`가 세 운세
-테이블, RLS·권한, `messages.kind`, 필수 인덱스, 건초 광고 세션 만료 계약과 migration checksum을
-확인하지 못하면 기존 컨테이너를 교체하기 전에 배포를 중단한다.
+오늘의 운세와 운세 대화는 dev·prod에서 활성화돼 있으며 `deploy.sh`가
+`FORTUNE_ENABLED=true`, `FORTUNE_CHAT_ENABLED=true`를 명시적으로 주입한다. 배포할 때마다
+`scripts/verify_fortune_schema.py`가 세 운세 테이블, RLS·권한, `messages.kind`, 필수 인덱스,
+건초 광고 세션 만료 계약과 migration checksum을 먼저 확인한다. 하나라도 다르면 후보 env를
+실행 중인 env로 교체하지 않고 기존 컨테이너를 유지한 채 배포를 중단한다.
+
+운세 관련 스키마를 바꾸는 릴리스는 운영 DB에 하위 호환 migration과 검증을 먼저 끝내고 코드를
+배포한다. infra만 머지해서는 실행 중인 컨테이너 설정이 바뀌지 않으므로, 기능 플래그나 Parameter
+Store 값을 바꾼 뒤에는 검증한 backend 이미지 SHA를 명시해 두 인스턴스를 다시 롤링 배포한다.
 
 ## 배치 워커 운영
 
@@ -58,10 +63,14 @@ SSM Parameter Store `/moly/prod/` 에서 런타임에 조회한다 (`/etc/moly-e
 IAM 역할로 처리되며 자격증명을 레포/스크립트에 두지 않는다.
 
 필수: `anthropic-api-key`, `openai-api-key`, `supabase-url`, `supabase-publishable-key`,
-`supabase-secret-key`, `supabase-db-connection-string`
+`supabase-secret-key`, `supabase-db-connection-string`, `revenuecat-webhook-auth`,
+`fortune-ad-unit-ids`
 (legacy `supabase-anon-key`/`supabase-service-role-key`는 2026-08 키 유출로 폐기)
 옵션: `fcm-project-id`, `fcm-service-account`(여러 줄 JSON — 파일로 생성돼 컨테이너에 마운트, 없으면 푸시만 비활성),
 `meta-install-referrer-decryption-key`(64자 hex — 없으면 설치 귀속 복호화 엔드포인트만 503)
+
+`fortune-ad-unit-ids`는 AdMob SSV의 `ad_unit`과 비교할 숫자 ID를 쉼표로 구분한다. 운영값은 iOS
+`3157498952`, Android `2146352961`이며 빈 값이면 운세 광고를 허용하지 않고 배포 자체도 실패한다.
 
 새 시크릿 추가 시: 파라미터 생성(`/moly/prod/<소문자-하이픈>`) + `deploy.sh`의 env 매핑에 한 줄 추가.
 
