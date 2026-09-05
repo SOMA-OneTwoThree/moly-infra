@@ -127,16 +127,18 @@ required_keys=(
   supabase-publishable-key
   supabase-secret-key
   revenuecat-webhook-auth
-  # 운세를 dev·prod 모두 활성화하므로 무료 사용자의 SSV 검증 allowlist도 필수다.
-  fortune-ad-unit-ids
 )
+# dev는 광고 연동 전에도 배포한다. 미설정 allowlist는 서버에서 광고 보상을 거부한다.
+if [ "$ENV_NAME" = "prod" ]; then
+  required_keys+=(fortune-ad-unit-ids)
+fi
 missing=()
 for k in "${required_keys[@]}"; do
   if [ -z "${PARAMS[$k]+x}" ]; then
     missing+=("${SSM_PATH}${k}")
   fi
 done
-if [ -n "${PARAMS[fortune-ad-unit-ids]+x}" ] && [ -z "${PARAMS[fortune-ad-unit-ids]}" ]; then
+if [ "$ENV_NAME" = "prod" ] && [ -n "${PARAMS[fortune-ad-unit-ids]+x}" ] && [ -z "${PARAMS[fortune-ad-unit-ids]}" ]; then
   missing+=("${SSM_PATH}fortune-ad-unit-ids(빈 값)")
 fi
 if [ "${#missing[@]}" -gt 0 ]; then
@@ -190,7 +192,7 @@ AGENT_ENABLED=true
 AGENT_CANARY_PCT=100
 FORTUNE_ENABLED=true
 FORTUNE_CHAT_ENABLED=true
-FORTUNE_AD_UNIT_IDS=${PARAMS[fortune-ad-unit-ids]}
+FORTUNE_AD_UNIT_IDS=${PARAMS[fortune-ad-unit-ids]:-}
 HAY_AD_UNIT_IDS=3343480648
 HAY_AD_REWARD_ITEM=Reward
 HAY_AD_REWARD_AMOUNT=1
