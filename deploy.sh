@@ -40,6 +40,9 @@ esac
 SSM_PATH="/moly/${ENV_NAME}/"
 SECRETS_DIR="$SCRIPT_DIR/secrets"
 FCM_FILE="$SECRETS_DIR/fcm-service-account.json"
+STATE_DIR="$SCRIPT_DIR/.deploy-state"
+NEXT_COMPOSE_ENV_FILE="$STATE_DIR/compose.env.next"
+NEXT_BACKEND_ENV_FILE="$STATE_DIR/backend.env.next"
 
 # 배포할 이미지 태그(불변 git-sha). GH Actions가 인자로 넘긴다. 인자 없이 실행(수동 재배포)하면
 # 마지막으로 배포된 태그를 재사용한다 — 수동 실행이 임의의 :latest로 되돌리는 사고 방지.
@@ -83,13 +86,13 @@ echo "==> ECR 로그인"
 aws ecr get-login-password --region "$REGION" \
   | docker login --username AWS --password-stdin "$ECR_REGISTRY"
 
-# .env 원자적 갱신(tmp + mv) — 워커 타이머가 임의 시점에 이 파일을 읽는다.
-# truncate-후-쓰기(>)는 반쪽 읽기 창을 만들고, ECR 로그인 전에 쓰면 "새 sha인데 pull 인증
-# 실패" 창이 생긴다(교차검증 이슈 #15). rename은 같은 FS에서 원자적이라 둘 다 제거된다.
+# 새 compose env는 DB preflight 전까지 live .env와 분리한다. preflight가 실패했는데 live .env만
+# 새 sha를 가리키면 systemd worker가 API보다 먼저 새 코드·플래그로 뜰 수 있다.
 # IMAGE_REPO도 함께 기록 — compose가 환경별 ECR 레포를 고른다(prod=moly-backend,
 # dev=moly-backend-dev). compose 쪽 기본값이 moly-backend라 prod는 이 줄이 없어도 동일.
-printf 'IMAGE_TAG=%s\nIMAGE_REPO=%s\n' "$IMAGE_TAG" "$IMAGE_REPO" > "$COMPOSE_ENV_FILE.tmp"
-mv "$COMPOSE_ENV_FILE.tmp" "$COMPOSE_ENV_FILE"
+mkdir -p "$STATE_DIR"
+chmod 700 "$STATE_DIR"
+printf 'IMAGE_TAG=%s\nIMAGE_REPO=%s\n' "$IMAGE_TAG" "$IMAGE_REPO" > "$NEXT_COMPOSE_ENV_FILE"
 
 # ---------------------------------------------------------------------------
 # 3. SSM Parameter Store에서 파라미터 조회 (복호화)
@@ -163,7 +166,7 @@ umask 077
 # 대화 기능 플래그(CURRENT_TURN_CONTEXT·CONTEXT_CHECKPOINT·AGENT)와 오늘의 운세·운세 대화는
 # dev에서 실제로 돌려 검증한 뒤 운영에서도 켠다. 아침 푸시(MORNING_PUSH_ENABLED)는 SOMA-338
 # 결정대로 계속 끈 상태를 유지한다 — 코드 기본값이 false다.
-cat > "$SCRIPT_DIR/backend.env.tmp" <<EOF
+cat > "$NEXT_BACKEND_ENV_FILE" <<EOF
 ENVIRONMENT=${APP_ENV}
 REVENUECAT_WEBHOOK_AUTH=${PARAMS[revenuecat-webhook-auth]}
 SUPABASE_URL=${PARAMS[supabase-url]}
@@ -188,19 +191,21 @@ AGENT_CANARY_PCT=100
 FORTUNE_ENABLED=true
 FORTUNE_CHAT_ENABLED=true
 FORTUNE_AD_UNIT_IDS=${PARAMS[fortune-ad-unit-ids]}
+HAY_AD_UNIT_IDS=3343480648
+HAY_AD_REWARD_ITEM=Reward
+HAY_AD_REWARD_AMOUNT=1
 EOF
 
 # dev 전용 — 운영에 가면 안 되는 것만 남긴다.
 # ENABLE_DEV_ROUTES는 강제 생성·유료 모델 평가 같은 위험 route를 여는 스위치다.
 # DEV_OPERATOR_USER_IDS는 Dev DB의 수동 검증 계정이라 운영에서는 의미가 없다.
 if [ "$ENV_NAME" = "dev" ]; then
-  cat >> "$SCRIPT_DIR/backend.env.tmp" <<EOF
+  cat >> "$NEXT_BACKEND_ENV_FILE" <<EOF
 ENABLE_DEV_ROUTES=true
 DEV_OPERATOR_USER_IDS=445bdde0-025b-403a-bab8-7816827016c3
 EOF
 fi
-chmod 600 "$SCRIPT_DIR/backend.env.tmp"
-mv "$SCRIPT_DIR/backend.env.tmp" "$SCRIPT_DIR/backend.env"
+chmod 600 "$NEXT_BACKEND_ENV_FILE"
 
 # FCM 서비스 계정 JSON — SSM SecureString(여러 줄) → 파일.
 # 컨테이너는 비루트(appuser)로 돌아 파일에 other-read가 필요하다.
@@ -221,10 +226,7 @@ chmod 644 "$FCM_FILE"
 # env/FCM 파일이 바뀌면 backend 컨테이너를 강제 재생성한다.
 # (이미지 콘텐츠 변경은 pull + up -d 가 자연 처리하므로 지문에 포함하지 않는다.)
 # 시크릿 값은 해시로만 다루고 출력하지 않는다.
-STATE_DIR="$SCRIPT_DIR/.deploy-state"
-mkdir -p "$STATE_DIR"
-
-new_backend_hash="$(cat "$SCRIPT_DIR/backend.env" "$FCM_FILE" | sha256sum | awk '{print $1}')"
+new_backend_hash="$(cat "$NEXT_BACKEND_ENV_FILE" "$FCM_FILE" | sha256sum | awk '{print $1}')"
 old_backend_hash="$(cat "$STATE_DIR/backend.hash" 2>/dev/null || true)"
 
 RECREATE=()
@@ -236,7 +238,26 @@ if [ "$new_backend_hash" != "$old_backend_hash" ]; then RECREATE+=("backend"); f
 # --env-file 명시: compose의 .env 자동 탐색은 cwd에 좌우된다 — 탐색 실패 시 에러 없이
 # :latest로 폴백되므로(태그 고정 무음 무력화) 경로를 항상 못박는다.
 echo "==> 이미지 pull"
-docker compose --env-file "$COMPOSE_ENV_FILE" -f "$COMPOSE_FILE" pull
+docker compose --env-file "$NEXT_COMPOSE_ENV_FILE" -f "$COMPOSE_FILE" pull
+
+# 운세 플래그를 켠 컨테이너가 뜨기 전에 DB 계약을 fail-closed로 확인한다. 일반 ready 체크는
+# SELECT 1만 하므로 테이블·CHECK·필수 인덱스·migration checksum 누락을 잡지 못한다.
+# 새 이미지의 asyncpg 환경을 사용하되 검증 코드는 infra에서 stdin으로 전달해 구 이미지 롤백도
+# 동일한 DB gate를 통과할 수 있게 한다. 읽기 전용 트랜잭션이며 사용자 데이터는 출력하지 않는다.
+BACKEND_IMAGE="$ECR_REGISTRY/$IMAGE_REPO:$IMAGE_TAG"
+FORTUNE_PREFLIGHT="$SCRIPT_DIR/scripts/verify_fortune_schema.py"
+if [ ! -f "$FORTUNE_PREFLIGHT" ]; then
+  echo "ERROR: 운세 DB preflight 스크립트 없음: $FORTUNE_PREFLIGHT" >&2
+  exit 1
+fi
+echo "==> 운세 DB preflight"
+docker run --rm -i --env-file "$NEXT_BACKEND_ENV_FILE" \
+  --entrypoint python "$BACKEND_IMAGE" - < "$FORTUNE_PREFLIGHT"
+
+# 모든 선행 검사가 끝난 뒤에만 live 파일을 원자적으로 교체한다. 여기부터 systemd worker와
+# compose가 새 sha·기능 플래그를 함께 보며, preflight 실패 시에는 두 live 파일 모두 이전 값이다.
+mv "$NEXT_BACKEND_ENV_FILE" "$SCRIPT_DIR/backend.env"
+mv "$NEXT_COMPOSE_ENV_FILE" "$COMPOSE_ENV_FILE"
 
 # ---------------------------------------------------------------------------
 # 6. 컨테이너 기동/갱신
@@ -258,7 +279,7 @@ docker compose --env-file "$COMPOSE_ENV_FILE" -f "$COMPOSE_FILE" up -d
 # 구 이미지 안전장치: 롤백으로 `worker.consumer`가 없는 이미지가 배포되면 컨테이너가 즉시 죽어
 # 아래 배포 게이트가 막힌다 — 롤백 자체가 불가능해진다. 모듈이 없으면 consumer를 건너뛰고
 # 배포는 계속한다. 구 이미지에는 애초에 이 잡들을 만드는 코드도 없다.
-CONSUMER_IMAGE="$ECR_REGISTRY/$IMAGE_REPO:$IMAGE_TAG"
+CONSUMER_IMAGE="$BACKEND_IMAGE"
 CONSUMER_STARTED=0
 echo "==> async job consumer 모듈 확인"
 if docker run --rm --entrypoint python "$CONSUMER_IMAGE" \

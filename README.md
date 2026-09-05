@@ -11,7 +11,7 @@ ECR 이미지를 받아 EC2(Ubuntu 24.04, ap-northeast-2)에서 **moly-backend**
 | 파일 | 역할 |
 |------|------|
 | `docker-compose.yml` | `backend`(API) + `worker`(15분 배치) + `consumer`(대화 후속 잡 상주). 이미지는 `.env`의 `IMAGE_TAG`(git-sha)·`IMAGE_REPO`(환경별 ECR 레포)로 고정 |
-| `deploy.sh` | EC2에서 실행: `bash deploy.sh <git-sha>` — ECR 로그인 → SSM 시크릿 조회 → `backend.env`/FCM 파일 생성 → pull → up → 게이트 → consumer → 워커 systemd 유닛(워커 호스트만) |
+| `deploy.sh` | EC2에서 실행: `bash deploy.sh <git-sha>` — ECR 로그인 → SSM 시크릿 조회 → `backend.env`/FCM 파일 생성 → pull → 운세 DB preflight → up → 게이트 → consumer → 워커 systemd 유닛(워커 호스트만) |
 | `systemd/moly-worker.{service,timer}` | 배치 워커 매시 정각 1틱 (`docker compose run --rm worker`) — **워커 호스트에서만 활성** |
 | `nginx/voice.moly.asia.conf` | EIP 직결 경로 참조본 (443 → 127.0.0.1:8000, LE 인증서 — DNS 롤백 경로로 유지) |
 | `nginx/alb-8080.conf` | ALB 경로 참조본 (Target Group → :8080 → 127.0.0.1:8000, 수동 반영) |
@@ -36,6 +36,11 @@ cd /root/moly-infra && git pull --ff-only && bash deploy.sh
 ```
 
 멱등이라 여러 번 실행해도 안전하다.
+
+운세 플래그를 활성화하는 infra 변경은 운영 DB 마이그레이션을 먼저 끝낸 뒤 머지하고, 검증한
+backend `main` SHA를 명시해 배포를 다시 실행한다. `scripts/verify_fortune_schema.py`가 세 운세
+테이블, RLS·권한, `messages.kind`, 필수 인덱스, 건초 광고 세션 만료 계약과 migration checksum을
+확인하지 못하면 기존 컨테이너를 교체하기 전에 배포를 중단한다.
 
 ## 배치 워커 운영
 
