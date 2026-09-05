@@ -79,7 +79,3 @@ dev는 광고 연동 전 누락·빈 값을 허용하며, 빈 allowlist를 전�
 ## 의존성 (EC2)
 
 docker, docker compose v2, aws cli v2, jq, nginx(+certbot), systemd
-
-공용 로그인과 개발 데이터 프로젝트를 분리할 때 `/moly/dev/supabase-auth-url`을 공용 Supabase Auth URL로 설정한다.
-`deploy.sh`는 이를 `SUPABASE_AUTH_URL`로 전달한다. 생략한 환경은 기존 `SUPABASE_URL`을 인증에도 사용한다.
-개발 DB 연결·Storage 프로젝트를 공용 로그인 프로젝트로 바꾸지 않는다. 새 변수 지원 서버를 배포해야 반영된다.

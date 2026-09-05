@@ -172,7 +172,6 @@ cat > "$NEXT_BACKEND_ENV_FILE" <<EOF
 ENVIRONMENT=${APP_ENV}
 REVENUECAT_WEBHOOK_AUTH=${PARAMS[revenuecat-webhook-auth]}
 SUPABASE_URL=${PARAMS[supabase-url]}
-SUPABASE_AUTH_URL=${PARAMS[supabase-auth-url]:-}
 SUPABASE_PUBLISHABLE_KEY=${PARAMS[supabase-publishable-key]}
 SUPABASE_SECRET_KEY=${PARAMS[supabase-secret-key]}
 SUPABASE_DB_CONNECTION_STRING=${PARAMS[supabase-db-connection-string]}
