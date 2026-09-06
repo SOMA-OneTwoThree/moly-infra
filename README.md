@@ -76,6 +76,9 @@ dev는 광고 연동 전 누락·빈 값을 허용하며, 빈 allowlist를 전�
 
 새 시크릿 추가 시: 파라미터 생성(`/moly/prod/<소문자-하이픈>`) + `deploy.sh`의 env 매핑에 한 줄 추가.
 
+건초 보상 광고의 `HAY_AD_UNIT_IDS`는 iOS `3343480648`과 Android `3086065971`을 함께
+주입한다. 운세 광고 ID와는 분리하며, infra 변경 후 backend를 재배포해야 컨테이너에 적용된다.
+
 ## 의존성 (EC2)
 
 docker, docker compose v2, aws cli v2, jq, nginx(+certbot), systemd
