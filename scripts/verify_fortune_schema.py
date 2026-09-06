@@ -1,4 +1,4 @@
-"""Fail-closed DB preflight before the fortune feature flags reach a container."""
+"""Read-only structural preflight for rollback images without db.schema_contract."""
 
 from __future__ import annotations
 
@@ -8,23 +8,6 @@ import re
 import sys
 
 import asyncpg
-
-EXPECTED_MIGRATIONS = {
-    "20260905_reward_ad_session_security.sql":
-        "5dc6b675bea854b33ab5415eb35163e53094dc66b5c83434f9df9508b3ae17d4",
-    "20260827_daily_fortune.sql":
-        "20f9bba075a7687a4bd51c8fb2736223f5644bd1684a79f035fa775c27b21405",
-    "20260827_daily_fortune_v2.sql":
-        "5acb9ea2d211920c16c0d405bf41c0d7f94ed5a91e0f86c5feb623441f4b3f93",
-    "20260905_fortune_chat_kind_constraint_prepare.sql":
-        "c134d6a8d20de35d05595acb164a663c8cd211028b01f9ae2720da752d0f8cf0",
-    "20260905_fortune_chat_kind_constraint_validate.sql":
-        "2c6b18dbe4ecd54bef52aefa58006a54b06b8a4087fe2d0212405d4feddf18a2",
-    "20260905_fortune_chat_kind_constraint_swap.sql":
-        "5f7f1361a548f49c05ddf8304ff018510ba0267babd541479db592cf8c25379e",
-    "20260905_fortune_chat_root_index.sql":
-        "6a48b3a98f154efb2a3f268b9261f87ae243021eb0a58dd1ba9318c8a1cafb3b",
-}
 
 REQUIRED_COLUMNS = {
     "fortune_profiles": {
@@ -189,20 +172,6 @@ async def _check() -> list[str]:
                 if "sender='user'::text" not in predicate or "kind='fortune_context_root'::text" not in predicate:
                     errors.append("messages_fortune_context_root_idx has unexpected predicate")
 
-            ledger_rows = await conn.fetch(
-                """
-                SELECT migration_name,checksum_sha256 FROM public.schema_migrations
-                WHERE migration_name=ANY($1::text[])
-                """,
-                list(EXPECTED_MIGRATIONS),
-            )
-            ledger = {row["migration_name"]: row["checksum_sha256"] for row in ledger_rows}
-            for name, checksum in EXPECTED_MIGRATIONS.items():
-                observed = ledger.get(name)
-                if observed is None:
-                    errors.append(f"missing migration ledger row: {name}")
-                elif observed != checksum:
-                    errors.append(f"migration checksum mismatch: {name}")
     finally:
         await conn.close()
     return errors
@@ -212,14 +181,14 @@ def main() -> int:
     try:
         errors = asyncio.run(_check())
     except Exception as exc:  # noqa: BLE001  # any preflight failure must stop deployment
-        print(f"ERROR: fortune DB preflight query failed: {type(exc).__name__}: {exc}", file=sys.stderr)
+        print(f"ERROR: fortune DB preflight query failed: {type(exc).__name__}", file=sys.stderr)
         return 1
     if errors:
         print("ERROR: fortune DB preflight failed:", file=sys.stderr)
         for error in errors:
             print(f"  - {error}", file=sys.stderr)
         return 1
-    print("  - fortune DB preflight OK (schema, RLS, grants, constraint, index, ledger)")
+    print("  - fortune DB preflight OK (schema, RLS, grants, constraint, index)")
     return 0
 
 

@@ -7,7 +7,7 @@ services:
     image: 676972757138.dkr.ecr.ap-northeast-2.amazonaws.com/${IMAGE_REPO:-moly-backend}:${IMAGE_TAG:-latest}
     container_name: moly-backend
     ports:
-      - "127.0.0.1:8000:8000"   # 루프백만 바인딩 — 외부는 nginx(443)를 통해서만
+      - "127.0.0.1:8000:8000"   # 루프백만 바인딩 — 외부는 ALB → nginx :8080을 통해서만
     env_file:
       - ./backend.env           # deploy.sh가 SSM에서 생성 (git 제외)
     volumes:
@@ -28,7 +28,7 @@ services:
       retries: 3
       start_period: 15s
 
-  # 배치 워커 — 상주 아님. systemd timer(moly-worker.timer)가 매시 정각
+  # 배치 워커 — 상주 아님. systemd timer(moly-worker.timer)가 15분마다
   # `docker compose run --rm worker`로 1틱 실행(멱등). profiles 덕분에
   # `up -d`로는 안 뜨고, run으로만 실행된다.
   worker:

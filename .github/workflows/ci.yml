@@ -1,0 +1,17 @@
+name: Validate infrastructure
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate shell scripts
+        run: bash -n deploy.sh setup_ec2.sh
+      - name: Test deployment success, failure and rollback paths
+        run: python3 -m unittest discover -s tests -v
