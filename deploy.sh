@@ -128,9 +128,11 @@ required_keys=(
   supabase-secret-key
   revenuecat-webhook-auth
 )
-# dev는 광고 연동 전에도 배포한다. 미설정 allowlist는 서버에서 광고 보상을 거부한다.
+# dev는 광고·피드백 전용 Slack 연동 전에도 배포한다. 운영은 두 값을 필수로 둔다.
+# 피드백 값이 빠지면 backend의 하위 호환 폴백이 alert 채널을 선택하므로, 조용히
+# 잘못 라우팅하지 말고 실행 중인 env를 교체하기 전에 배포를 중단한다.
 if [ "$ENV_NAME" = "prod" ]; then
-  required_keys+=(fortune-ad-unit-ids)
+  required_keys+=(fortune-ad-unit-ids slack-feedback-webhook-url)
 fi
 missing=()
 for k in "${required_keys[@]}"; do
@@ -140,6 +142,10 @@ for k in "${required_keys[@]}"; do
 done
 if [ "$ENV_NAME" = "prod" ] && [ -n "${PARAMS[fortune-ad-unit-ids]+x}" ] && [ -z "${PARAMS[fortune-ad-unit-ids]}" ]; then
   missing+=("${SSM_PATH}fortune-ad-unit-ids(빈 값)")
+fi
+if [ "$ENV_NAME" = "prod" ] && [ -n "${PARAMS[slack-feedback-webhook-url]+x}" ] \
+  && [ -z "${PARAMS[slack-feedback-webhook-url]}" ]; then
+  missing+=("${SSM_PATH}slack-feedback-webhook-url(빈 값)")
 fi
 if [ "${#missing[@]}" -gt 0 ]; then
   echo "ERROR: SSM 파라미터 누락: ${missing[*]}" >&2
@@ -157,8 +163,9 @@ umask 077
 # FCM_PROJECT_ID/FCM 파일·SLACK_WEBHOOK_URL은 옵션(:-): 없으면 backend가 조용히 스킵/no-op.
 # SLACK_WEBHOOK_URL은 워커 요약 알림용 — 이 줄이 빠지면 backend.env에 안 실려 워커가
 # 값을 못 받고(env len=0) 슬랙 요약이 조용히 no-op 된다(2026-07 워커 알림 누락 원인).
-# 모니터링(SOMA-301): SLACK_ALERT/STATUS_WEBHOOK_URL(severity 라우팅)·HEALTH_TOKEN(deep/synthetic
-# 인증)·WORKER_PING_URL(Healthchecks 데드맨). 전부 옵션(:-) — 미설정 시 알림 no-op/폴백.
+# 모니터링(SOMA-301): SLACK_ALERT/STATUS/FEEDBACK_WEBHOOK_URL(severity 라우팅)·
+# HEALTH_TOKEN(deep/synthetic 인증)·WORKER_PING_URL(Healthchecks 데드맨).
+# feedback은 prod 필수, 나머지는 옵션(:-) — 미설정 시 알림 no-op/폴백.
 # 여기 나열 안 하면 SSM에 있어도 컨테이너까지 안 감(backend.env는 명시 나열만 싣는다).
 # META_INSTALL_REFERRER_DECRYPTION_KEY도 옵션(:-) — Meta 설치 리퍼러 복호화 키(64자 hex).
 # 비면 /attribution/meta-referrer/decrypt 만 503으로 답하고 앱이 다음 실행에서 재시도한다.
@@ -180,6 +187,7 @@ OPENAI_API_KEY=${PARAMS[openai-api-key]}
 SLACK_WEBHOOK_URL=${PARAMS[slack-webhook-url]:-}
 SLACK_ALERT_WEBHOOK_URL=${PARAMS[slack-alert-webhook-url]:-}
 SLACK_STATUS_WEBHOOK_URL=${PARAMS[slack-status-webhook-url]:-}
+SLACK_FEEDBACK_WEBHOOK_URL=${PARAMS[slack-feedback-webhook-url]:-}
 HEALTH_TOKEN=${PARAMS[health-token]:-}
 WORKER_PING_URL=${PARAMS[worker-ping-url]:-}
 FCM_PROJECT_ID=${PARAMS[fcm-project-id]:-}
