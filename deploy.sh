@@ -251,7 +251,7 @@ echo "==> 이미지 pull"
 docker compose --env-file "$NEXT_COMPOSE_ENV_FILE" -f "$COMPOSE_FILE" pull
 
 # 운세 플래그를 켠 컨테이너가 뜨기 전에 DB 계약을 fail-closed로 확인한다. 일반 ready 체크는
-# SELECT 1만 하므로 테이블·CHECK·필수 인덱스·migration checksum 누락을 잡지 못한다.
+# SELECT 1만 하므로 테이블·CHECK·필수 인덱스 누락을 잡지 못한다.
 # 새 이미지의 asyncpg 환경을 사용하되 검증 코드는 infra에서 stdin으로 전달해 구 이미지 롤백도
 # 동일한 DB gate를 통과할 수 있게 한다. 읽기 전용 트랜잭션이며 사용자 데이터는 출력하지 않는다.
 BACKEND_IMAGE="$ECR_REGISTRY/$IMAGE_REPO:$IMAGE_TAG"
@@ -260,9 +260,21 @@ if [ ! -f "$FORTUNE_PREFLIGHT" ]; then
   echo "ERROR: 운세 DB preflight 스크립트 없음: $FORTUNE_PREFLIGHT" >&2
   exit 1
 fi
-echo "==> 운세 DB preflight"
-docker run --rm -i --env-file "$NEXT_BACKEND_ENV_FILE" \
-  --entrypoint python "$BACKEND_IMAGE" - < "$FORTUNE_PREFLIGHT"
+echo "==> DB schema preflight"
+if docker run --rm --entrypoint python "$BACKEND_IMAGE" \
+    -c "import importlib.util,sys; sys.exit(0 if importlib.util.find_spec('db') and importlib.util.find_spec('db.schema_contract') else 3)"; then
+  docker run --rm --env-file "$NEXT_BACKEND_ENV_FILE" \
+    --entrypoint python "$BACKEND_IMAGE" -m db.schema_contract
+else
+  schema_probe_rc=$?
+  if [ "$schema_probe_rc" -ne 3 ]; then
+    echo "ERROR: DB schema verifier probe failed (exit=$schema_probe_rc)" >&2
+    exit 1
+  fi
+  # 기존 이미지 롤백: 당시 기능의 구조 계약은 유지하되 폐기한 migration 원장을 요구하지 않는다.
+  docker run --rm -i --env-file "$NEXT_BACKEND_ENV_FILE" \
+    --entrypoint python "$BACKEND_IMAGE" - < "$FORTUNE_PREFLIGHT"
+fi
 
 # 모든 선행 검사가 끝난 뒤에만 live 파일을 원자적으로 교체한다. 여기부터 systemd worker와
 # compose가 새 sha·기능 플래그를 함께 보며, preflight 실패 시에는 두 live 파일 모두 이전 값이다.

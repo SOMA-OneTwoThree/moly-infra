@@ -185,6 +185,5 @@ cat <<DONE
    - ECR pull (ecr:GetAuthorizationToken + BatchGetImage 등)  ← 빠지면 배포 실패
 
  참고: TLS는 ALB(ACM)가 종료하므로 이 호스트에 certbot/LE는 설치하지 않는다.
-       (레거시 EIP+LE 경로는 2026-07-27 폐기 완료 — 복원 절차는 docs/INFRA.md 참조)
 ============================================================
 DONE

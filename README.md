@@ -1,87 +1,108 @@
 # moly-infra
 
-ECR 이미지를 받아 EC2(Ubuntu 24.04, ap-northeast-2)에서 **moly-backend**를 띄우는 배포 레포.
-빌드는 앱 레포(`moly-backend`)의 GitHub Actions가 담당하고, 이 레포는 **이미지를 실행**만 한다.
+moly-backend의 ECR 이미지를 EC2에서 실행하는 인프라 원본이다. 이미지 빌드와 호스트별 롤링
+배포 순서는 moly-backend의 `.github/workflows/deploy.yml`과 `deploy-dev.yml`이 소유한다.
+이 저장소의 `deploy.sh`는 한 호스트를 배포한다.
 
-> 구 스택(ai-voice + llm 2컨테이너)은 2026-07 moly-backend 단일 서비스로 전환됨.
-> 전환 작업 상세는 moly-backend 레포의 `docs/DEPLOY_MIGRATION.md` 참고.
+## 실행 구조
 
-## 구성
+HTTPS → ALB(ACM TLS 종료) → nginx `:8080` → API `127.0.0.1:8000`.
+nginx 원본은 `nginx/alb-8080.conf`이며 `setup_ec2.sh`가 설치한다. 인스턴스에 별도 TLS 인증서를
+설치하지 않는다. nginx 수정 시에는 원본과 호스트 설정을 함께 갱신하고 `nginx -t`로 검증한다.
 
-| 파일 | 역할 |
-|------|------|
-| `docker-compose.yml` | `backend`(API) + `worker`(15분 배치) + `consumer`(대화 후속 잡 상주). 이미지는 `.env`의 `IMAGE_TAG`(git-sha)·`IMAGE_REPO`(환경별 ECR 레포)로 고정 |
-| `deploy.sh` | EC2에서 실행: `bash deploy.sh <git-sha>` — ECR 로그인 → SSM 시크릿 조회 → `backend.env`/FCM 파일 생성 → pull → 운세 DB preflight → up → 게이트 → consumer → 워커 systemd 유닛(워커 호스트만) |
-| `systemd/moly-worker.{service,timer}` | 배치 워커 매시 정각 1틱 (`docker compose run --rm worker`) — **워커 호스트에서만 활성** |
-| `nginx/voice.moly.asia.conf` | EIP 직결 경로 참조본 (443 → 127.0.0.1:8000, LE 인증서 — DNS 롤백 경로로 유지) |
-| `nginx/alb-8080.conf` | ALB 경로 참조본 (Target Group → :8080 → 127.0.0.1:8000, 수동 반영) |
+| 구성 | 실행 계약 |
+|---|---|
+| `backend` | API 상주 프로세스. 외부에 컨테이너 포트를 직접 열지 않는다 |
+| `worker` | `moly-worker.timer`가 매시 :00·:15·:30·:45에 1틱 실행. 최대 14분 |
+| `consumer` | 대화 후속 잡을 상주 처리. 각 호스트에서 `SKIP LOCKED`로 잡을 나눠 처리 |
+| `/etc/moly-worker-host` | 이 파일이 있는 호스트에서만 배치 타이머 설치·활성화 |
+| `/etc/moly-env` | 없음: prod. 내용 `dev`: dev. 빈 값·잘못된 값·읽기 실패: 배포 중단 |
 
-- `backend`: `127.0.0.1:8000` 루프백만 바인딩. 외부 유입은 ALB(ACM, 443) → nginx :8080 프록시
-- `worker`: 상주하지 않음. `moly-worker.timer`가 매시 정각 `docker compose run --rm worker` 실행(멱등 1틱)
-- `consumer`: 기억·일기 색인·약속·관계·대화 요약 잡을 상주 처리. dev·prod 모두 deploy.sh가 `consumer` profile을 기동한다. **워커와 달리 호스트 제한이 없다** — 잡을 집어갈 때 `FOR UPDATE SKIP LOCKED`를 써서 두 대가 같은 잡을 처리하지 않고 나눠 갖는다. 이미지에 `worker.consumer`가 없으면(구 버전 롤백) 기동을 건너뛰고 배포는 계속한다
-- **워커 단일 호스트 규칙**: `/etc/moly-worker-host` 마커가 있는 인스턴스에서만 deploy.sh가 타이머를 설치/활성하고, 없는 호스트에선 비활성화한다. 두 대에서 동시 실행되면 매시 틱 2회 = LLM 일기 비용 2배 + 허위 알림. **호스트 재구축(AMI 복원 등) 시 마커를 수동 재생성해야 한다** (`sudo touch /etc/moly-worker-host`). 워커 호스트 이동: 기존 마커 삭제 → 새 호스트 마커 생성 → 양쪽 재배포
-- **환경 마커** (개발서버 전용): `/etc/moly-env`에 `dev`가 적힌 호스트는 deploy.sh가 SSM `/moly/dev/`를 읽는다. **prod 호스트에는 이 파일을 만들지 않는다** (없음 = prod, 기존 동작). 워커 마커와 달리 **내용이 필요** — `sudo touch`로 만들면 빈 값으로 배포가 즉시 실패한다. dev 호스트 재구축 시 재생성: `echo dev | sudo tee /etc/moly-env`. 상세: `docs/DEV-SERVER.md`
-- 이미지 태그: GH Actions가 `deploy.sh <git-sha>`로 넘기고 `.env`(IMAGE_TAG·IMAGE_REPO)에 기록된다. `IMAGE_REPO`는 환경 마커에 따라 deploy.sh가 결정 — prod `moly-backend` / dev `moly-backend-dev`. 인자 없이 재실행하면 마지막 태그 재사용(멱등). `:latest`는 소비하지 않는다
-- `backend.env` / `secrets/fcm-service-account.json` / `.env` 는 `deploy.sh`가 런타임에 생성하며 git에 커밋하지 않는다
+동일 환경의 배치 워커는 한 호스트에만 둔다. 이전 호스트의 마커를 제거하고 재배포해 타이머를
+중지한 다음 새 호스트에 마커를 생성하고 배포한다. consumer에는 이 마커 제한이 없다.
 
-## 배포
+## 환경과 설정
 
-1. moly-backend 레포 main push → GitHub Actions가 이미지 빌드 → ECR push
-2. Actions가 SSM SendCommand로 EC2에서 `git pull && bash deploy.sh` 실행
+| 환경 | SSM 경로 | ECR 저장소 | `ENVIRONMENT` |
+|---|---|---|---|
+| prod | `/moly/prod/` | `moly-backend` | `production` |
+| dev | `/moly/dev/` | `moly-backend-dev` | `development` |
 
-수동 배포 (EC2에서, `sudo su -` 후):
+개발 호스트에서는 `echo dev | sudo tee /etc/moly-env`로 내용을 기록한다.
+prod 호스트에는 마커 파일이 필요 없다. 환경별 Supabase Auth와 데이터 프로젝트는 분리된
+현재 구성을 사용한다. 배너 검증 계정도 dev 프로젝트의 계정이다.
+
+SSM 값은 EC2 IAM 역할로 조회한다. `deploy.sh`가 `.env`, `backend.env`,
+`secrets/fcm-service-account.json`을 생성하므로 이 파일들을 직접 편집하지 않는다.
+환경변수의 정확한 이름·기본값·매핑은 `deploy.sh`가 원본이다.
+
+필수 SSM 키:
+`anthropic-api-key`, `openai-api-key`, `supabase-db-connection-string`, `supabase-url`,
+`supabase-publishable-key`, `supabase-secret-key`, `revenuecat-webhook-auth`.
+prod는 `fortune-ad-unit-ids`와 `slack-feedback-webhook-url`도 비어 있지 않아야 한다. dev의 빈 운세 광고 allowlist는 배포를
+허용하지만 해당 광고 보상은 서버에서 거부한다.
+
+옵션에는 FCM 설정, Slack 요약·알림·상태 webhook(dev의 사용자 피드백 webhook도 옵션), `health-token`,
+`worker-ping-url`, `meta-install-referrer-decryption-key`가 있다. 해당 SSM 키가 존재해도
+`backend.env`에 매핑되지 않으면 컨테이너에 전달되지 않는다.
+
+대화 컨텍스트·checkpoint·agent와 운세·운세 대화 기능은 dev·prod에서 켠다.
+위험한 개발 라우트와 개발 운영자 계정 설정은 dev에만 넣는다.
+
+## 배포와 롤백
+
+1. backend의 dev/main 브랜치 배포 workflow가 해당 환경의 이미지를 빌드한다.
+2. prod workflow는 기본 2대를 확인하고 ALB에서 한 호스트씩 제외한다. dev는 별도 태그의
+   1대에 중단 배포하며 ALB를 조작하지 않는다.
+3. 해당 호스트에서 infra를 갱신하고 `bash deploy.sh <image-tag>`를 실행한다.
+4. prod는 호스트·외부 경로 검증 후 ALB에 다시 등록하고 다음 호스트를 처리한다.
+   dev 태그는 `dev-<sha>`, prod 태그는 `<sha>`다.
+
+`deploy.sh`의 실행 순서는 ECR 로그인 → SSM 조회 → 후보 env 생성 → 이미지 pull → DB preflight
+→ live env 교체 → API·consumer 기동 → 헬스·이미지·nginx 검사 → 워커 타이머 갱신이다.
+DB preflight 실패 시 live `.env`와 `backend.env`를 교체하지 않는다.
+현재 FCM 파일은 preflight 전에 작성되므로, preflight 실패가 모든 런타임 파일을 원복한다는
+뜻은 아니다.
+
+이미지 SHA를 인자로 전달하는 것이 표준이다. 인자를 생략하면 마지막 `.env`의 태그를 재사용한다.
+아직 기록된 태그도 없으면 현재 구현은 `latest`로 폴백하므로 첫 배포에도 검증한 SHA를 명시한다.
+이미지는 호스트에서 해당 저장소의 최근 3개 태그를 유지하며, 사용 중인 이미지는 제거되지 않는다.
+
+운영 롤백은 backend 배포 workflow의 `workflow_dispatch`에서 기존 `image_tag`를 지정한다.
+workflow의 ALB 제외·복귀 절차를 그대로 사용한다. 호스트의 `deploy.sh`를 단독 실행하는 것은
+전체 플릿의 롤링 배포가 아니다.
+
+구 이미지에 `worker.consumer`가 없으면 consumer를 건너뛰고 남은 consumer 컨테이너를 제거한다.
+모듈이 있으면 실제 핸들러 등록까지 검사한다. 이 분기는 구 이미지로 롤백할 때도 유지하는 계약이다.
+
+## DB 계약
+
+DB 구조 원본은 moly-backend의 `db/schema.sql`이다. 기존 DB 변경은 검토한 SQL을 수동으로
+적용하고 검증한다. 배포 스크립트는 DB를 변경하지 않는다.
+
+새 이미지의 `python -m db.schema_contract`가 해당 이미지에 포함된 스키마 계약을 읽어
+실제 DB의 컬럼·제약·인덱스·함수·트리거·RLS·권한을 검사한다. 새 테이블 추가는 구 이미지
+롤백을 막지 않으며, 기존 객체의 제약 변경·누락·권한 확대는 실패한다.
+
+검증 모듈이 없는 구 이미지로 롤백할 때는 `scripts/verify_fortune_schema.py`로 당시 운세
+테이블·권한·광고 만료·메시지 제약·인덱스를 검사한다. 파일 checksum이나 적용 원장 행은
+요구하지 않는다. 검증 실패 시 후보 컨테이너 기동 전에 중단한다.
+
+## 호스트 구성과 점검
+
+`setup_ec2.sh`는 Ubuntu 24.04 x86_64에 Docker/Compose, AWS CLI, nginx와 저장소를 설치한다.
+SG는 ALB에서 오는 8080만 허용하고 접속은 SSM을 사용한다. 워커 마커는 자동 생성하지 않는다.
+호스트를 추가하면 backend workflow의 대상 수·태그·Target Group도 함께 확인한다.
 
 ```bash
-cd /root/moly-infra && git pull --ff-only && bash deploy.sh
+docker compose --env-file /root/moly-infra/.env -f /root/moly-infra/docker-compose.yml ps
+curl -fsS http://127.0.0.1:8000/health/ready
+curl -fsS http://127.0.0.1:8080/health
+systemctl list-timers moly-worker.timer
+systemctl status moly-worker.service
+journalctl -u moly-worker.service -n 100
 ```
 
-멱등이라 여러 번 실행해도 안전하다.
-
-오늘의 운세와 운세 대화는 dev·prod에서 활성화돼 있으며 `deploy.sh`가
-`FORTUNE_ENABLED=true`, `FORTUNE_CHAT_ENABLED=true`를 명시적으로 주입한다. 배포할 때마다
-`scripts/verify_fortune_schema.py`가 세 운세 테이블, RLS·권한, `messages.kind`, 필수 인덱스,
-건초 광고 세션 만료 계약과 migration checksum을 먼저 확인한다. 하나라도 다르면 후보 env를
-실행 중인 env로 교체하지 않고 기존 컨테이너를 유지한 채 배포를 중단한다.
-
-운세 관련 스키마를 바꾸는 릴리스는 운영 DB에 하위 호환 migration과 검증을 먼저 끝내고 코드를
-배포한다. infra만 머지해서는 실행 중인 컨테이너 설정이 바뀌지 않으므로, 기능 플래그나 Parameter
-Store 값을 바꾼 뒤에는 검증한 backend 이미지 SHA를 명시해 두 인스턴스를 다시 롤링 배포한다.
-
-## 배치 워커 운영
-
-```bash
-systemctl list-timers moly-worker.timer     # 다음 실행 시각
-systemctl status moly-worker.service        # 마지막 실행 결과
-journalctl -u moly-worker.service -n 100    # 워커 로그
-systemctl start moly-worker.service         # 수동 1틱 (멱등이라 안전)
-```
-
-## 시크릿
-
-SSM Parameter Store `/moly/prod/` 에서 런타임에 조회한다 (`/etc/moly-env` 마커가 `dev`인
-개발서버는 `/moly/dev/`). AWS 인증은 EC2 인스턴스
-IAM 역할로 처리되며 자격증명을 레포/스크립트에 두지 않는다.
-
-필수: `anthropic-api-key`, `openai-api-key`, `supabase-url`, `supabase-publishable-key`,
-`supabase-secret-key`, `supabase-db-connection-string`, `revenuecat-webhook-auth`,
-`fortune-ad-unit-ids`·`slack-feedback-webhook-url`(두 값은 prod에서만 필수)
-(legacy `supabase-anon-key`/`supabase-service-role-key`는 2026-08 키 유출로 폐기)
-옵션: `fcm-project-id`, `fcm-service-account`(여러 줄 JSON — 파일로 생성돼 컨테이너에 마운트, 없으면 푸시만 비활성),
-`meta-install-referrer-decryption-key`(64자 hex — 없으면 설치 귀속 복호화 엔드포인트만 503)
-
-`fortune-ad-unit-ids`는 AdMob SSV의 `ad_unit`과 비교할 숫자 ID를 쉼표로 구분한다. 운영값은 iOS
-`3157498952`, Android `2146352961`이다. prod는 누락·빈 값이면 배포가 실패한다.
-dev는 광고 연동 전 누락·빈 값을 허용하며, 빈 allowlist를 전달해 서버의 기존 광고 보상 거부를 유지한다.
-다른 필수 파라미터와 운세 DB preflight는 환경에 관계없이 계속 검증한다.
-
-새 시크릿 추가 시: 파라미터 생성(`/moly/prod/<소문자-하이픈>`) + `deploy.sh`의 env 매핑에 한 줄 추가.
-
-건초 보상 광고의 `HAY_AD_UNIT_IDS`는 iOS `3343480648`과 Android `3086065971`을 함께
-주입한다. 운세 광고 ID와는 분리하며, infra 변경 후 backend를 재배포해야 컨테이너에 적용된다.
-
-운영 사용자 피드백은 `slack-feedback-webhook-url`이 가리키는 전용 채널로 전달한다. 이 값이
-없으면 서버 경보 채널로 폴백할 수 있으므로 운영 배포는 파라미터 누락 시 사전에 실패한다.
-
-## 의존성 (EC2)
-
-docker, docker compose v2, aws cli v2, jq, nginx(+certbot), systemd
+`/health/ready`는 DB 연결, `/health`의 version은 이미지 버전 확인에 사용한다.
+외부 경로 장애는 ALB 대상 상태 → nginx `:8080` → API readiness 순으로 확인한다.
+배포 실패 시에는 workflow 출력과 해당 호스트의 컨테이너·systemd 로그를 확인한다.
