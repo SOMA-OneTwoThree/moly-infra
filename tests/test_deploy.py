@@ -113,6 +113,9 @@ class DeployTests(unittest.TestCase):
                 (root / 'host/moly-worker-host').touch()
             (root / '.env').write_text('IMAGE_TAG=old-image\nIMAGE_REPO=moly-backend\n')
             (root / 'backend.env').write_text('OLD_ENV=keep\n')
+            (root / 'secrets').mkdir()
+            (root / 'secrets/fcm-service-account.json').write_text('{"project_id":"old-project"}')
+            original_fcm_inode = (root / 'secrets/fcm-service-account.json').stat().st_ino
             (root / 'bin').mkdir()
             for command in ['aws', 'docker', 'curl', 'jq', 'df', 'sleep', 'systemctl']:
                 target = root / 'bin' / command
@@ -129,6 +132,7 @@ class DeployTests(unittest.TestCase):
             files = {name: (root / name).read_text() for name in ['.env', 'backend.env']}
             fcm = root / 'secrets/fcm-service-account.json'
             files['fcm'] = fcm.read_text() if fcm.exists() else None
+            files['fcm_preserved_inode'] = fcm.exists() and fcm.stat().st_ino == original_fcm_inode
             return runs[-1], events, files
 
     def test_new_images_check_candidate_before_promoting_dev_and_prod(self):
@@ -145,6 +149,7 @@ class DeployTests(unittest.TestCase):
                 self.assertEqual('ENABLE_DEV_ROUTES=true' in files['backend.env'], environment == 'dev')
                 self.assertIn('FORTUNE_CHAT_ENABLED=true', files['backend.env'])
                 self.assertEqual(json.loads(files['fcm']), {'project_id': 'test-project'})
+                self.assertTrue(files['fcm_preserved_inode'])
                 self.assertNotIn('test-supabase-secret-key', run.stdout + run.stderr)
                 self.assertTrue(any(e['kind'] == 'systemctl' and e['args'][:2] == ['enable', '--now'] for e in events))
 
@@ -174,6 +179,17 @@ class DeployTests(unittest.TestCase):
         self.assertIn('remove_consumer', kinds)
         self.assertNotIn('consumer_startup', kinds)
         self.assertTrue(any(e['kind'] == 'systemctl' and e['args'][:2] == ['disable', '--now'] for e in events))
+
+    def test_failed_preflight_preserves_existing_fcm_credentials(self):
+        for failure in [{'schema_fail': 1}, {'schema_probe': 125},
+                        {'schema_probe': 3, 'schema_fail': 1}, {'pull_fail': 1}]:
+            for fcm in [{}, {'empty': 'fcm-service-account'}, {'missing': 'fcm-service-account'}]:
+                with self.subTest(failure=failure, fcm=fcm):
+                    run, events, files = self.run_deploy(dict(failure, **fcm))
+                    self.assertNotEqual(run.returncode, 0)
+                    self.assertNotIn('up', [e['kind'] for e in events])
+                    self.assertEqual(json.loads(files['fcm']), {'project_id': 'old-project'})
+                    self.assertTrue(files['fcm_preserved_inode'])
 
     def test_invalid_marker_and_missing_prod_configuration_fail(self):
         for case in [{'marker': ''}, {'marker': 'deev'}, {'empty': 'fortune-ad-unit-ids'},

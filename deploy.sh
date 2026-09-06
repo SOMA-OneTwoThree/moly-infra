@@ -43,6 +43,7 @@ FCM_FILE="$SECRETS_DIR/fcm-service-account.json"
 STATE_DIR="$SCRIPT_DIR/.deploy-state"
 NEXT_COMPOSE_ENV_FILE="$STATE_DIR/compose.env.next"
 NEXT_BACKEND_ENV_FILE="$STATE_DIR/backend.env.next"
+NEXT_FCM_FILE="$STATE_DIR/fcm-service-account.json.next"
 
 # 배포할 이미지 태그(불변 git-sha). GH Actions가 인자로 넘긴다. 인자 없이 실행(수동 재배포)하면
 # 마지막으로 배포된 태그를 재사용한다 — 수동 실행이 임의의 :latest로 되돌리는 사고 방지.
@@ -223,12 +224,12 @@ chmod 600 "$NEXT_BACKEND_ENV_FILE"
 mkdir -p "$SECRETS_DIR"
 chmod 700 "$SECRETS_DIR"
 if [ -n "${PARAMS[fcm-service-account]+x}" ] && [ -n "${PARAMS[fcm-service-account]}" ]; then
-  printf '%s' "${PARAMS[fcm-service-account]}" > "$FCM_FILE"
+  printf '%s' "${PARAMS[fcm-service-account]}" > "$NEXT_FCM_FILE"
 else
   echo "WARN: ${SSM_PATH}fcm-service-account 미설정 — FCM 푸시 비활성 (빈 파일로 대체)" >&2
-  : > "$FCM_FILE"
+  : > "$NEXT_FCM_FILE"
 fi
-chmod 644 "$FCM_FILE"
+chmod 600 "$NEXT_FCM_FILE"
 
 # ---------------------------------------------------------------------------
 # 4-b. 설정 지문 계산 (설정 변경 감지용)
@@ -236,7 +237,7 @@ chmod 644 "$FCM_FILE"
 # env/FCM 파일이 바뀌면 backend 컨테이너를 강제 재생성한다.
 # (이미지 콘텐츠 변경은 pull + up -d 가 자연 처리하므로 지문에 포함하지 않는다.)
 # 시크릿 값은 해시로만 다루고 출력하지 않는다.
-new_backend_hash="$(cat "$NEXT_BACKEND_ENV_FILE" "$FCM_FILE" | sha256sum | awk '{print $1}')"
+new_backend_hash="$(cat "$NEXT_BACKEND_ENV_FILE" "$NEXT_FCM_FILE" | sha256sum | awk '{print $1}')"
 old_backend_hash="$(cat "$STATE_DIR/backend.hash" 2>/dev/null || true)"
 
 RECREATE=()
@@ -276,7 +277,13 @@ else
     --entrypoint python "$BACKEND_IMAGE" - < "$FORTUNE_PREFLIGHT"
 fi
 
-# 모든 선행 검사가 끝난 뒤에만 live 파일을 원자적으로 교체한다. 여기부터 systemd worker와
+# FCM도 preflight 전에는 후보 파일만 만든다. 실패한 배포가 기존 푸시 자격증명을 지우지 않는다.
+# 기존 파일에 복사해 bind mount의 inode를 유지한다(FCM만 바뀐 경우에도 기존 consumer가 읽을 수 있음).
+cp "$NEXT_FCM_FILE" "$FCM_FILE"
+chmod 644 "$FCM_FILE"
+rm -f "$NEXT_FCM_FILE"
+
+# 모든 선행 검사가 끝난 뒤에만 live env 파일을 원자적으로 교체한다. 여기부터 systemd worker와
 # compose가 새 sha·기능 플래그를 함께 보며, preflight 실패 시에는 두 live 파일 모두 이전 값이다.
 mv "$NEXT_BACKEND_ENV_FILE" "$SCRIPT_DIR/backend.env"
 mv "$NEXT_COMPOSE_ENV_FILE" "$COMPOSE_ENV_FILE"

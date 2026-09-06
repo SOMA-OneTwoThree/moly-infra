@@ -58,11 +58,11 @@ prod는 `fortune-ad-unit-ids`와 `slack-feedback-webhook-url`도 비어 있지 �
 4. prod는 호스트·외부 경로 검증 후 ALB에 다시 등록하고 다음 호스트를 처리한다.
    dev 태그는 `dev-<sha>`, prod 태그는 `<sha>`다.
 
-`deploy.sh`의 실행 순서는 ECR 로그인 → SSM 조회 → 후보 env 생성 → 이미지 pull → DB preflight
-→ live env 교체 → API·consumer 기동 → 헬스·이미지·nginx 검사 → 워커 타이머 갱신이다.
-DB preflight 실패 시 live `.env`와 `backend.env`를 교체하지 않는다.
-현재 FCM 파일은 preflight 전에 작성되므로, preflight 실패가 모든 런타임 파일을 원복한다는
-뜻은 아니다.
+`deploy.sh`의 실행 순서는 ECR 로그인 → SSM 조회 → 후보 env·FCM 생성 → 이미지 pull → DB preflight
+→ live FCM·env 교체 → API·consumer 기동 → 헬스·이미지·nginx 검사 → 워커 타이머 갱신이다.
+이미지 pull·DB preflight 실패 시 live `.env`·`backend.env`·FCM 자격증명 파일을 교체하지 않는다.
+FCM 반영은 기존 bind mount의 파일 inode를 유지한다. 이 단계 이후의 컨테이너 기동 실패까지
+모든 파일을 자동으로 원복하는 것은 아니며, 운영 롤백 절차로 처리한다.
 
 이미지 SHA를 인자로 전달하는 것이 표준이다. 인자를 생략하면 마지막 `.env`의 태그를 재사용한다.
 아직 기록된 태그도 없으면 현재 구현은 `latest`로 폴백하므로 첫 배포에도 검증한 SHA를 명시한다.
