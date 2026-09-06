@@ -64,7 +64,7 @@ IAM 역할로 처리되며 자격증명을 레포/스크립트에 두지 않는�
 
 필수: `anthropic-api-key`, `openai-api-key`, `supabase-url`, `supabase-publishable-key`,
 `supabase-secret-key`, `supabase-db-connection-string`, `revenuecat-webhook-auth`,
-`fortune-ad-unit-ids`(prod에서만 필수)
+`fortune-ad-unit-ids`·`slack-feedback-webhook-url`(두 값은 prod에서만 필수)
 (legacy `supabase-anon-key`/`supabase-service-role-key`는 2026-08 키 유출로 폐기)
 옵션: `fcm-project-id`, `fcm-service-account`(여러 줄 JSON — 파일로 생성돼 컨테이너에 마운트, 없으면 푸시만 비활성),
 `meta-install-referrer-decryption-key`(64자 hex — 없으면 설치 귀속 복호화 엔드포인트만 503)
@@ -78,6 +78,9 @@ dev는 광고 연동 전 누락·빈 값을 허용하며, 빈 allowlist를 전�
 
 건초 보상 광고의 `HAY_AD_UNIT_IDS`는 iOS `3343480648`과 Android `3086065971`을 함께
 주입한다. 운세 광고 ID와는 분리하며, infra 변경 후 backend를 재배포해야 컨테이너에 적용된다.
+
+운영 사용자 피드백은 `slack-feedback-webhook-url`이 가리키는 전용 채널로 전달한다. 이 값이
+없으면 서버 경보 채널로 폴백할 수 있으므로 운영 배포는 파라미터 누락 시 사전에 실패한다.
 
 ## 의존성 (EC2)
 
