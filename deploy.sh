@@ -157,6 +157,13 @@ echo "==> 파라미터 ${#PARAMS[@]}개 수신"
 # ---------------------------------------------------------------------------
 # 4. env 파일 + FCM 서비스 계정 파일 생성
 # ---------------------------------------------------------------------------
+# Optional rollout switch: invalid values stop before replacing live env files.
+MORNING_PUSH_ENABLED="${PARAMS[morning-push-enabled]:-false}"
+case "$MORNING_PUSH_ENABLED" in
+  true|false) ;;
+  *) echo "ERROR: morning-push-enabled must be true or false" >&2; exit 1 ;;
+esac
+
 echo "==> env 파일 작성"
 umask 077
 
@@ -174,8 +181,8 @@ umask 077
 # 원자적 쓰기(tmp + mv): 워커 타이머의 docker compose run이 임의 시점에 이 파일을 읽는다 —
 # truncate 직후 반쪽 파일을 읽으면 DB 연결 문자열 없는 워커가 뜬다(교차검증 이슈 #15).
 # 대화 기능 플래그(CURRENT_TURN_CONTEXT·CONTEXT_CHECKPOINT·AGENT)와 오늘의 운세·운세 대화는
-# dev에서 실제로 돌려 검증한 뒤 운영에서도 켠다. 아침 푸시(MORNING_PUSH_ENABLED)는 SOMA-338
-# 결정대로 계속 끈 상태를 유지한다 — 코드 기본값이 false다.
+# dev에서 실제로 돌려 검증한 뒤 운영에서도 켠다. 아침 푸시는 환경별 SSM 옵션으로
+# 별도 활성화하며, 미설정이면 false라 기존 배포의 발송 상태를 유지한다.
 cat > "$NEXT_BACKEND_ENV_FILE" <<EOF
 ENVIRONMENT=${APP_ENV}
 REVENUECAT_WEBHOOK_AUTH=${PARAMS[revenuecat-webhook-auth]}
@@ -192,6 +199,7 @@ SLACK_FEEDBACK_WEBHOOK_URL=${PARAMS[slack-feedback-webhook-url]:-}
 HEALTH_TOKEN=${PARAMS[health-token]:-}
 WORKER_PING_URL=${PARAMS[worker-ping-url]:-}
 FCM_PROJECT_ID=${PARAMS[fcm-project-id]:-}
+MORNING_PUSH_ENABLED=${MORNING_PUSH_ENABLED}
 FCM_SERVICE_ACCOUNT_FILE=/secrets/fcm-service-account.json
 META_INSTALL_REFERRER_DECRYPTION_KEY=${PARAMS[meta-install-referrer-decryption-key]:-}
 CURRENT_TURN_CONTEXT_ENABLED=true
