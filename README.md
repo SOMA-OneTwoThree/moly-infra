@@ -106,3 +106,12 @@ journalctl -u moly-worker.service -n 100
 `/health/ready`는 DB 연결, `/health`의 version은 이미지 버전 확인에 사용한다.
 외부 경로 장애는 ALB 대상 상태 → nginx `:8080` → API readiness 순으로 확인한다.
 배포 실패 시에는 workflow 출력과 해당 호스트의 컨테이너·systemd 로그를 확인한다.
+
+### 아침 일기 푸시 활성화
+
+- 환경별 `/moly/dev/morning-push-enabled`, `/moly/prod/morning-push-enabled` 옵션을 `backend.env`의 `MORNING_PUSH_ENABLED`에 전달한다
+- 값은 `true` 또는 `false`만 허용하며 미설정은 `false`다. 잘못된 값은 기존 env 교체 전에 배포를 중단한다
+- 설정만 바꿔서는 반영되지 않는다. 해당 환경의 배포를 통해 env를 갱신해야 한다
+- 대상 일기 판정과 알림 ID를 포함하는 backend 및 대응 클라이언트를 검증한 뒤 개발→운영 순서로 별도 활성화한다
+- 이번 코드 변경은 SSM 값을 생성·변경하거나 실제 발송을 활성화하지 않는다
+- 끌 때도 `false`로 설정한 뒤 해당 환경을 재배포한다. 이미 FCM이 수락한 메시지는 서버에서 회수할 수 없다
