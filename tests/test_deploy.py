@@ -37,6 +37,7 @@ if name=='aws':
           'supabase-url','supabase-publishable-key','supabase-secret-key',
           'revenuecat-webhook-auth','fortune-ad-unit-ids','slack-feedback-webhook-url']
         values={k:'test-'+k for k in keys}
+        values.update(case.get('parameters', {}))
         values['fcm-service-account']='{\n  "project_id": "test-project"\n}'
         if case.get('missing'): values.pop(case['missing'])
         if case.get('empty'): values[case['empty']]=''
@@ -152,6 +153,19 @@ class DeployTests(unittest.TestCase):
                 self.assertTrue(files['fcm_preserved_inode'])
                 self.assertNotIn('test-supabase-secret-key', run.stdout + run.stderr)
                 self.assertTrue(any(e['kind'] == 'systemctl' and e['args'][:2] == ['enable', '--now'] for e in events))
+
+    def test_revenuecat_read_configuration_is_optional_and_not_logged(self):
+        for environment in ['dev', 'prod']:
+            for configured in [False, True]:
+                with self.subTest(environment=environment, configured=configured):
+                    parameters = ({'revenuecat-api-v2-key': 'test-rc-read-secret',
+                                   'revenuecat-project-id': 'test-rc-project'} if configured else {})
+                    run, _, files = self.run_deploy({'environment': environment, 'parameters': parameters})
+                    self.assertEqual(run.returncode, 0, run.stderr)
+                    env = dict(line.split('=', 1) for line in files['backend.env'].splitlines())
+                    self.assertEqual(env['REVENUECAT_API_V2_KEY'], parameters.get('revenuecat-api-v2-key', ''))
+                    self.assertEqual(env['REVENUECAT_PROJECT_ID'], parameters.get('revenuecat-project-id', ''))
+                    self.assertNotIn('test-rc-read-secret', run.stdout + run.stderr)
 
     def test_preflight_and_pull_failures_preserve_live_env(self):
         for failure in [{'schema_fail': 1}, {'schema_probe': 125}, {'schema_probe': 3, 'schema_fail': 1},
