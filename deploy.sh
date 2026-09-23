@@ -186,6 +186,8 @@ umask 077
 cat > "$NEXT_BACKEND_ENV_FILE" <<EOF
 ENVIRONMENT=${APP_ENV}
 REVENUECAT_WEBHOOK_AUTH=${PARAMS[revenuecat-webhook-auth]}
+REVENUECAT_API_V2_KEY=${PARAMS[revenuecat-api-v2-key]:-}
+REVENUECAT_PROJECT_ID=${PARAMS[revenuecat-project-id]:-}
 SUPABASE_URL=${PARAMS[supabase-url]}
 SUPABASE_PUBLISHABLE_KEY=${PARAMS[supabase-publishable-key]}
 SUPABASE_SECRET_KEY=${PARAMS[supabase-secret-key]}

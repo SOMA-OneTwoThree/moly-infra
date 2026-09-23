@@ -45,6 +45,8 @@ prod는 `fortune-ad-unit-ids`와 `slack-feedback-webhook-url`도 비어 있지 �
 옵션에는 FCM 설정, Slack 요약·알림·상태 webhook(dev의 사용자 피드백 webhook도 옵션), `health-token`,
 `worker-ping-url`, `meta-install-referrer-decryption-key`가 있다. 해당 SSM 키가 존재해도
 `backend.env`에 매핑되지 않으면 컨테이너에 전달되지 않는다.
+RevenueCat 조회용 `revenuecat-api-v2-key`(SecureString)와 `revenuecat-project-id`(String)도 옵션이다.
+각각 `REVENUECAT_API_V2_KEY`, `REVENUECAT_PROJECT_ID`로 전달되며, 미설정 시 빈 값이다.
 
 대화 컨텍스트·checkpoint·agent와 운세·운세 대화 기능은 dev·prod에서 켠다.
 위험한 개발 라우트와 개발 운영자 계정 설정은 dev에만 넣는다.
