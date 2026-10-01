@@ -1,0 +1,9 @@
+# moly-worker.service가 실패(TimeoutStartSec 초과·비정상 종료)하면 systemd OnFailure=로 1회 실행된다.
+# 상태 채널에 한 줄만 남긴다 — 한 번의 실패는 다음 틱이 이어받고, 계속 실패하면 데드맨이 따로 경보한다.
+# 이 파일은 moly-infra/systemd/ 가 원본이며, deploy.sh가 /etc/systemd/system/ 에 설치/갱신한다.
+[Unit]
+Description=Moly batch worker tick failure notice (status channel)
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/bash /root/moly-infra/scripts/notify-worker-failure.sh

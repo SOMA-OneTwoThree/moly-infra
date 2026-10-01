@@ -444,7 +444,8 @@ WORKER_HOST_MARKER="/etc/moly-worker-host"
 if [ -f "$WORKER_HOST_MARKER" ]; then
   echo "==> 워커 호스트 — systemd 유닛 확인"
   units_changed=0
-  for unit in moly-worker.service moly-worker.timer; do
+  # moly-worker-failed.service: 틱 실패 시 OnFailure=로 뜨는 상태 채널 알림(enable 불필요).
+  for unit in moly-worker.service moly-worker.timer moly-worker-failed.service; do
     src="$SCRIPT_DIR/systemd/$unit"
     dst="/etc/systemd/system/$unit"
     if [ ! -f "$src" ]; then

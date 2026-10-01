@@ -12,6 +12,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Validate shell scripts
-        run: bash -n deploy.sh setup_ec2.sh
+        run: bash -n deploy.sh setup_ec2.sh scripts/notify-worker-failure.sh
       - name: Test deployment success, failure and rollback paths
         run: python3 -m unittest discover -s tests -v
