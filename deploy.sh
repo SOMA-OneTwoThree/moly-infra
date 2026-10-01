@@ -175,6 +175,12 @@ case "$MORNING_PUSH_ENABLED" in
   true|false) ;;
   *) echo "ERROR: morning-push-enabled must be true or false" >&2; exit 1 ;;
 esac
+# FCM이 무효로 확정한 푸시 토큰(UNREGISTERED)의 비활성 표시. 미설정 false = 드라이런(분류·로그만).
+FCM_INVALIDATE_DEAD_TOKENS="${PARAMS[fcm-invalidate-dead-tokens]:-false}"
+case "$FCM_INVALIDATE_DEAD_TOKENS" in
+  true|false) ;;
+  *) echo "ERROR: fcm-invalidate-dead-tokens must be true or false" >&2; exit 1 ;;
+esac
 
 echo "==> env 파일 작성"
 umask 077
@@ -214,6 +220,7 @@ HEALTH_TOKEN=${PARAMS[health-token]:-}
 WORKER_PING_URL=${PARAMS[worker-ping-url]:-}
 FCM_PROJECT_ID=${PARAMS[fcm-project-id]:-}
 MORNING_PUSH_ENABLED=${MORNING_PUSH_ENABLED}
+FCM_INVALIDATE_DEAD_TOKENS=${FCM_INVALIDATE_DEAD_TOKENS}
 FCM_SERVICE_ACCOUNT_FILE=/secrets/fcm-service-account.json
 META_INSTALL_REFERRER_DECRYPTION_KEY=${PARAMS[meta-install-referrer-decryption-key]:-}
 CURRENT_TURN_CONTEXT_ENABLED=true

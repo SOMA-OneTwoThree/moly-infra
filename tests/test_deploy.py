@@ -214,6 +214,23 @@ class DeployTests(unittest.TestCase):
                     self.assertEqual(env['REVENUECAT_PROJECT_ID'], parameters.get('revenuecat-project-id', ''))
                     self.assertNotIn('test-rc-read-secret', run.stdout + run.stderr)
 
+    def test_fcm_dead_token_switch_defaults_to_dry_run_and_rejects_other_values(self):
+        # 미설정이면 false(드라이런: 분류·로그만). true/false 외 값은 live env를 바꾸기 전에 중단한다.
+        for parameters, expected in [({}, 'false'), ({'fcm-invalidate-dead-tokens': 'true'}, 'true'),
+                                     ({'fcm-invalidate-dead-tokens': 'false'}, 'false')]:
+            with self.subTest(parameters=parameters):
+                run, _, files = self.run_deploy({'parameters': parameters})
+                self.assertEqual(run.returncode, 0, run.stderr)
+                env = dict(line.split('=', 1) for line in files['backend.env'].splitlines())
+                self.assertEqual(env['FCM_INVALIDATE_DEAD_TOKENS'], expected)
+        for value in ['TRUE', 'yes', '1']:
+            with self.subTest(value=value):
+                run, events, files = self.run_deploy({'parameters': {'fcm-invalidate-dead-tokens': value}})
+                self.assertNotEqual(run.returncode, 0)
+                self.assertEqual(files['backend.env'], 'OLD_ENV=keep\n')
+                self.assertNotIn('up', [e['kind'] for e in events])
+                self.assertIn('fcm-invalidate-dead-tokens', run.stderr)
+
     def test_preflight_and_pull_failures_preserve_live_env(self):
         for failure in [{'schema_fail': 1}, {'schema_probe': 125}, {'schema_probe': 3, 'schema_fail': 1},
                         {'pull_fail': 1}, {'login_fail': 1}, {'missing': 'supabase-secret-key'}]:
