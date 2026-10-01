@@ -58,6 +58,18 @@ IMAGE_TAG="${IMAGE_TAG:-latest}"
 # 틱 시작 시점에 .env를 읽으므로, "새 sha는 적혔는데 ECR 자격이 만료된" 창을 없애기 위함.
 echo "==> 배포 태그: IMAGE_TAG=$IMAGE_TAG"
 
+# 사전점검 전용 모드(§5 DB preflight 직후 종료) — 값은 0·1만 받는다. 오타(true 등)가 조용히 전체 배포로
+# 실행되면 아직 ALB에 붙어 있는 호스트의 컨테이너를 교체하므로, 아무것도 하기 전에 멈춘다.
+# moly-backend deploy.yml은 아래 대입 줄(줄 맨 앞)로 이 모드가 있는지 확인한다 — 이름·들여쓰기를 바꾸면 함께 고친다.
+PREFLIGHT_ONLY="${DEPLOY_PREFLIGHT_ONLY:-0}"
+case "$PREFLIGHT_ONLY" in
+  0|1) ;;
+  *) printf "ERROR: DEPLOY_PREFLIGHT_ONLY 값이 0|1 이 아닙니다: %q\n" "$PREFLIGHT_ONLY" >&2; exit 1 ;;
+esac
+if [ "$PREFLIGHT_ONLY" = "1" ]; then
+  echo "==> 사전점검 전용 모드 — 이미지 pull·DB 계약 검증까지만 하고 live 파일·컨테이너는 바꾸지 않는다"
+fi
+
 echo "==> moly-backend 배포 시작 (region=$REGION, account=$ACCOUNT_ID, env=$ENV_NAME)"
 
 # 의존성 확인
@@ -285,6 +297,16 @@ else
   # 기존 이미지 롤백: 당시 기능의 구조 계약은 유지하되 폐기한 migration 원장을 요구하지 않는다.
   docker run --rm -i --env-file "$NEXT_BACKEND_ENV_FILE" \
     --entrypoint python "$BACKEND_IMAGE" - < "$FORTUNE_PREFLIGHT"
+fi
+
+# 사전점검 전용 모드는 여기서 끝낸다. prod 롤링 배포 workflow가 ALB에서 빼기 전에 호스트마다 실행한다.
+# 2026-09-07 23:16 KST: 새 스키마 계약이 운영 DB에 없어 위 preflight가 실패했는데, 이미 ALB에서 빠진
+# #1이 2시간 20분 로테이션 밖에 남았다. 빼기 전에 여기서 걸러지면 서비스 영향이 없다.
+# 후보 파일만 지운다 — live .env·backend.env·FCM·지문(backend.hash)·컨테이너·워커 타이머는 그대로다.
+if [ "$PREFLIGHT_ONLY" = "1" ]; then
+  rm -f "$NEXT_FCM_FILE" "$NEXT_BACKEND_ENV_FILE" "$NEXT_COMPOSE_ENV_FILE"
+  echo "==> preflight-only 통과: 이미지 pull·DB 계약 검증 OK — live 파일·컨테이너 미변경"
+  exit 0
 fi
 
 # FCM도 preflight 전에는 후보 파일만 만든다. 실패한 배포가 기존 푸시 자격증명을 지우지 않는다.

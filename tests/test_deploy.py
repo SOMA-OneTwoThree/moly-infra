@@ -94,7 +94,7 @@ else: raise AssertionError(name)
 
 
 class DeployTests(unittest.TestCase):
-    def run_deploy(self, case=None, *, source=None, twice=False):
+    def run_deploy(self, case=None, *, source=None, twice=False, extra_env=None):
         case = case or {}
         with tempfile.TemporaryDirectory(prefix='moly-deploy-test-') as directory:
             root = Path(directory)
@@ -124,6 +124,7 @@ class DeployTests(unittest.TestCase):
                 target.chmod(0o755)
             env = dict(os.environ, PATH=str(root / 'bin') + ':' + os.environ['PATH'],
                        DEPLOY_TEST_ROOT=str(root), DEPLOY_TEST_CASE=json.dumps(case))
+            env.update(extra_env or {})
             args = ['bash', str(root / 'deploy.sh'), 'candidate-image']
             runs = []
             for _ in range(2 if twice else 1):
@@ -134,7 +135,52 @@ class DeployTests(unittest.TestCase):
             fcm = root / 'secrets/fcm-service-account.json'
             files['fcm'] = fcm.read_text() if fcm.exists() else None
             files['fcm_preserved_inode'] = fcm.exists() and fcm.stat().st_ino == original_fcm_inode
+            state = root / '.deploy-state'
+            files['next_left'] = sorted(p.name for p in state.glob('*.next')) if state.exists() else []
+            files['hash_written'] = (state / 'backend.hash').exists()
             return runs[-1], events, files
+
+    def test_preflight_only_validates_without_touching_live_state(self):
+        # workflow가 ALB에서 빼기 전에 돌리는 모드: pull·DB 계약 검증까지만, 실패해도 live는 그대로.
+        side_effects = ['up', 'inspect', 'consumer_probe', 'consumer_startup', 'remove_consumer',
+                        'ready', 'nginx', 'systemctl', 'image', 'rmi', 'ps', 'logs']
+        for case in [{}, {'schema_probe': 3}, {'schema_fail': 1}, {'schema_probe': 125},
+                     {'schema_probe': 3, 'schema_fail': 1}, {'pull_fail': 1}, {'login_fail': 1},
+                     {'missing': 'supabase-secret-key'}]:
+            with self.subTest(case=case):
+                passes = case in ({}, {'schema_probe': 3})
+                run, events, files = self.run_deploy(dict(case, worker=True),
+                                                     extra_env={'DEPLOY_PREFLIGHT_ONLY': '1'})
+                kinds = [e['kind'] for e in events]
+                self.assertEqual(run.returncode == 0, passes, run.stderr)
+                for kind in side_effects:
+                    self.assertNotIn(kind, kinds)
+                self.assertEqual(files['backend.env'], 'OLD_ENV=keep\n')
+                self.assertIn('IMAGE_TAG=old-image', files['.env'])
+                self.assertEqual(json.loads(files['fcm']), {'project_id': 'old-project'})
+                self.assertTrue(files['fcm_preserved_inode'])
+                self.assertFalse(files['hash_written'])
+                self.assertNotIn('test-supabase-secret-key', run.stdout + run.stderr)
+                self.assertNotIn('배포 완료', run.stdout)
+                if passes:
+                    self.assertIn('fallback_schema' if case else 'full_schema', kinds)
+                    self.assertEqual(files['next_left'], [])
+                    self.assertIn('preflight-only 통과', run.stdout)
+
+    def test_preflight_only_accepts_only_zero_or_one(self):
+        for value in ['true', 'yes', '2', ' 1']:
+            with self.subTest(value=value):
+                run, events, files = self.run_deploy(extra_env={'DEPLOY_PREFLIGHT_ONLY': value})
+                self.assertNotEqual(run.returncode, 0)
+                self.assertEqual(events, [])
+                self.assertEqual(files['backend.env'], 'OLD_ENV=keep\n')
+                self.assertIn('DEPLOY_PREFLIGHT_ONLY', run.stderr)
+        for value in ['0', '']:
+            with self.subTest(value=value):
+                run, events, files = self.run_deploy(extra_env={'DEPLOY_PREFLIGHT_ONLY': value})
+                self.assertEqual(run.returncode, 0, run.stderr)
+                self.assertIn('up', [e['kind'] for e in events])
+                self.assertIn('IMAGE_TAG=candidate-image', files['.env'])
 
     def test_new_images_check_candidate_before_promoting_dev_and_prod(self):
         for environment in ['dev', 'prod']:

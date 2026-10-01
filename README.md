@@ -54,8 +54,10 @@ RevenueCat 조회용 `revenuecat-api-v2-key`(SecureString)와 `revenuecat-projec
 ## 배포와 롤백
 
 1. backend의 dev/main 브랜치 배포 workflow가 해당 환경의 이미지를 빌드한다.
-2. prod workflow는 기본 2대를 확인하고 ALB에서 한 호스트씩 제외한다. dev는 별도 태그의
-   1대에 중단 배포하며 ALB를 조작하지 않는다.
+2. prod workflow는 기본 2대를 확인하고, 먼저 모든 호스트에서
+   `sudo env DEPLOY_PREFLIGHT_ONLY=1 bash deploy.sh <image-tag>`로 사전점검한 뒤 ALB에서 한 호스트씩
+   제외한다. 사전점검이 하나라도 실패하면 어떤 호스트도 제외하지 않는다. dev는 별도 태그의 1대에
+   중단 배포하며 ALB를 조작하지 않는다.
 3. 해당 호스트에서 infra를 갱신하고 `bash deploy.sh <image-tag>`를 실행한다.
 4. prod는 호스트·외부 경로 검증 후 ALB에 다시 등록하고 다음 호스트를 처리한다.
    dev 태그는 `dev-<sha>`, prod 태그는 `<sha>`다.
@@ -63,6 +65,8 @@ RevenueCat 조회용 `revenuecat-api-v2-key`(SecureString)와 `revenuecat-projec
 `deploy.sh`의 실행 순서는 ECR 로그인 → SSM 조회 → 후보 env·FCM 생성 → 이미지 pull → DB preflight
 → live FCM·env 교체 → API·consumer 기동 → 헬스·이미지·nginx 검사 → 워커 타이머 갱신이다.
 이미지 pull·DB preflight 실패 시 live `.env`·`backend.env`·FCM 자격증명 파일을 교체하지 않는다.
+`DEPLOY_PREFLIGHT_ONLY=1`이면 DB preflight까지만 하고 후보 파일을 지운 뒤 끝낸다 — live 파일·컨테이너·
+워커 타이머는 그대로다. 값은 `0`·`1`만 받는다(그 밖의 값은 아무것도 하기 전에 실패).
 FCM 반영은 기존 bind mount의 파일 inode를 유지한다. 이 단계 이후의 컨테이너 기동 실패까지
 모든 파일을 자동으로 원복하는 것은 아니며, 운영 롤백 절차로 처리한다.
 
