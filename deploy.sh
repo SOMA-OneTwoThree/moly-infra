@@ -300,8 +300,8 @@ else
 fi
 
 # 사전점검 전용 모드는 여기서 끝낸다. prod 롤링 배포 workflow가 ALB에서 빼기 전에 호스트마다 실행한다.
-# 2026-09-07 23:16 KST: 새 스키마 계약이 운영 DB에 없어 위 preflight가 실패했는데, 이미 ALB에서 빠진
-# #1이 2시간 20분 로테이션 밖에 남았다. 빼기 전에 여기서 걸러지면 서비스 영향이 없다.
+# ALB에서 뺀 뒤 위 preflight가 실패하면 그 호스트는 수동 복구 전까지 로테이션 밖에 남는다.
+# 빼기 전에 여기서 걸러지면 서비스 영향이 없다.
 # 후보 파일만 지운다 — live .env·backend.env·FCM·지문(backend.hash)·컨테이너·워커 타이머는 그대로다.
 if [ "$PREFLIGHT_ONLY" = "1" ]; then
   rm -f "$NEXT_FCM_FILE" "$NEXT_BACKEND_ENV_FILE" "$NEXT_COMPOSE_ENV_FILE"
