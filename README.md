@@ -43,7 +43,7 @@ prod는 `fortune-ad-unit-ids`와 `slack-feedback-webhook-url`도 비어 있지 �
 허용하지만 해당 광고 보상은 서버에서 거부한다.
 
 옵션에는 FCM 설정, Slack 요약·알림·상태 webhook(dev의 사용자 피드백 webhook도 옵션), `health-token`,
-`worker-ping-url`, `meta-install-referrer-decryption-key`가 있다. 해당 SSM 키가 존재해도
+`worker-ping-url`, `meta-install-referrer-decryption-key`, `fcm-invalidate-dead-tokens`가 있다. 해당 SSM 키가 존재해도
 `backend.env`에 매핑되지 않으면 컨테이너에 전달되지 않는다.
 RevenueCat 조회용 `revenuecat-api-v2-key`(SecureString)와 `revenuecat-project-id`(String)도 옵션이다.
 각각 `REVENUECAT_API_V2_KEY`, `REVENUECAT_PROJECT_ID`로 전달되며, 미설정 시 빈 값이다.
@@ -121,3 +121,11 @@ journalctl -u moly-worker.service -n 100
 - 대상 일기 판정과 알림 ID를 포함하는 backend 및 대응 클라이언트를 검증한 뒤 개발→운영 순서로 별도 활성화한다
 - 이번 코드 변경은 SSM 값을 생성·변경하거나 실제 발송을 활성화하지 않는다
 - 끌 때도 `false`로 설정한 뒤 해당 환경을 재배포한다. 이미 FCM이 수락한 메시지는 서버에서 회수할 수 없다
+
+### FCM 무효 토큰 비활성 표시
+
+- 환경별 `/moly/dev/fcm-invalidate-dead-tokens`, `/moly/prod/fcm-invalidate-dead-tokens` 옵션을 `backend.env`의 `FCM_INVALIDATE_DEAD_TOKENS`에 전달한다
+- 값은 `true` 또는 `false`만 허용하며 미설정은 `false`(드라이런 — 분류·로그만)다. 잘못된 값은 기존 env 교체 전에 배포를 중단한다
+- `true`면 워커가 FCM이 무효로 확정한 토큰(`UNREGISTERED`)에 `user_devices.invalidated_at`을 기록하고 이후 발송에서 건너뛴다. 행은 지우지 않으며, 앱이 같은 토큰을 다시 등록하면 다시 발송 대상이 된다
+- 설정만 바꿔서는 반영되지 않는다. 해당 환경을 재배포해야 한다. 끌 때도 `false`로 설정한 뒤 재배포한다
+- 켜기 전 드라이런 확인과 되돌리기는 moly-backend `docs/OPERATIONS.md`를 따른다
