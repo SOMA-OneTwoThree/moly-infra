@@ -138,6 +138,7 @@ class DeployTests(unittest.TestCase):
             state = root / '.deploy-state'
             files['next_left'] = sorted(p.name for p in state.glob('*.next')) if state.exists() else []
             files['hash_written'] = (state / 'backend.hash').exists()
+            files['units'] = sorted(p.name for p in (root / 'host/systemd/system').iterdir())
             return runs[-1], events, files
 
     def test_preflight_only_validates_without_touching_live_state(self):
@@ -274,6 +275,21 @@ class DeployTests(unittest.TestCase):
                 self.assertIn(reached, kinds, run.stderr)
                 self.assertNotEqual(run.returncode, 0)
                 self.assertNotIn('배포 완료', run.stdout)
+
+    def test_worker_host_installs_failure_notice_unit(self):
+        # 틱 실패 알림 유닛은 워커 호스트에만, 워커 유닛과 함께 설치된다(OnFailure 대상이 없으면 안 뜬다).
+        for worker in [True, False]:
+            with self.subTest(worker=worker):
+                run, _, files = self.run_deploy({'worker': worker})
+                self.assertEqual(run.returncode, 0, run.stderr)
+                expected = ['moly-worker-failed.service', 'moly-worker.service', 'moly-worker.timer']
+                self.assertEqual(files['units'], expected if worker else [])
+        self.assertIn('OnFailure=moly-worker-failed.service',
+                      (ROOT / 'systemd/moly-worker.service').read_text().splitlines())
+        notice = (ROOT / 'systemd/moly-worker-failed.service').read_text()
+        self.assertIn('ExecStart=/usr/bin/bash /root/moly-infra/scripts/notify-worker-failure.sh',
+                      notice.splitlines())
+        self.assertTrue((ROOT / 'scripts/notify-worker-failure.sh').is_file())
 
     def test_same_config_does_not_force_recreate_again(self):
         run, events, _ = self.run_deploy(twice=True)

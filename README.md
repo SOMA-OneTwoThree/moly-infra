@@ -13,7 +13,7 @@ nginx 원본은 `nginx/alb-8080.conf`이며 `setup_ec2.sh`가 설치한다. 인�
 | 구성 | 실행 계약 |
 |---|---|
 | `backend` | API 상주 프로세스. 외부에 컨테이너 포트를 직접 열지 않는다 |
-| `worker` | `moly-worker.timer`가 매시 :00·:15·:30·:45에 1틱 실행. 최대 14분 |
+| `worker` | `moly-worker.timer`가 매시 :00·:15·:30·:45에 1틱 실행. 최대 14분. 실패하면 `moly-worker-failed.service`가 상태 채널에 한 줄 알림 |
 | `consumer` | 대화 후속 잡을 상주 처리. 각 호스트에서 `SKIP LOCKED`로 잡을 나눠 처리 |
 | `/etc/moly-worker-host` | 이 파일이 있는 호스트에서만 배치 타이머 설치·활성화 |
 | `/etc/moly-env` | 없음: prod. 내용 `dev`: dev. 빈 값·잘못된 값·읽기 실패: 배포 중단 |
