@@ -107,11 +107,18 @@ curl -fsS http://127.0.0.1:8080/health
 systemctl list-timers moly-worker.timer
 systemctl status moly-worker.service
 journalctl -u moly-worker.service -n 100
+journalctl -t moly-backend --since "1 hour ago"
 ```
 
 `/health/ready`는 DB 연결, `/health`의 version은 이미지 버전 확인에 사용한다.
 외부 경로 장애는 ALB 대상 상태 → nginx `:8080` → API readiness 순으로 확인한다.
 배포 실패 시에는 workflow 출력과 해당 호스트의 컨테이너·systemd 로그를 확인한다.
+
+컨테이너 로그는 compose의 journald 드라이버로 호스트 journald에 남는다.
+- 배포로 컨테이너가 다시 만들어져도 이전 로그를 `journalctl -t moly-backend`(`moly-consumer`, `moly-worker`)로 볼 수 있다. `docker logs`는 지금 컨테이너의 로그만 보여 준다
+- 용량은 journald 전역 상한(기본: 파일시스템의 10%, 최대 4G)을 따르고, 넘으면 오래된 로그부터 지워진다. 보존 기간은 90일 상한이다(`systemd/journald-moly.conf`, `setup_ec2.sh`가 설치)
+- 워커 틱 출력은 유닛 로그(`-u moly-worker.service`)와 `-t moly-worker` 양쪽에 남는다. 유닛이 시간 상한에 걸린 뒤 컨테이너가 쓴 줄은 `-t moly-worker`에만 있다
+- 컨테이너 줄은 dockerd가 보내므로 `journalctl -u docker.service`에도 섞인다. 데몬 로그만 볼 때는 `-t dockerd`를 쓴다
 
 ### 아침 일기 푸시 활성화
 

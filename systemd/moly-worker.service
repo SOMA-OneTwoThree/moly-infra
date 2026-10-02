@@ -15,7 +15,7 @@ WorkingDirectory=/root/moly-infra
 ExecStart=/usr/bin/docker compose --env-file /root/moly-infra/.env -f /root/moly-infra/docker-compose.yml run --rm --quiet-pull worker
 # 15분 케이던스 — 다음 틱 전에 끝나도록 상한을 둔다. 워커는 WORKER_TICK_SOFT_DEADLINE_S(기본 660s)에
 # 스스로 유저 루프를 멈추고 후처리 뒤 끝나므로(그 시각의 마지막 틱은 끝까지 처리) 이 상한은 백스톱이다.
-# 상한에 걸리면 systemd는 `docker compose run` 클라이언트만 종료한다 — 컨테이너는 끝까지 처리하지만
-# 그 로그는 journald에 남지 않고 다음 틱 컨테이너와 겹친다. 중복 생성은 멱등(SOMA-373 claim +
-# _diary_exists)이 막는다. Type=oneshot이라 실행 중이면 다음 트리거는 스킵된다.
+# 상한에 걸리면 systemd는 `docker compose run` 클라이언트만 종료한다 — 컨테이너는 끝까지 처리하며
+# 다음 틱 컨테이너와 겹칠 수 있고, 그 뒤 로그는 이 유닛이 아니라 `journalctl -t moly-worker`에 남는다.
+# 중복 생성은 멱등(SOMA-373 claim + _diary_exists)이 막는다. Type=oneshot이라 실행 중이면 다음 트리거는 스킵된다.
 TimeoutStartSec=14min

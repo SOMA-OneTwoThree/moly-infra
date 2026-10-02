@@ -15,11 +15,13 @@ services:
       # 파일이 없으면 컨테이너가 안 뜨므로 deploy.sh가 없을 때 빈 파일이라도 만든다.
       - ./secrets/fcm-service-account.json:/secrets/fcm-service-account.json:ro
     restart: unless-stopped
+    # 로그는 호스트 journald에 남긴다 — json-file은 컨테이너와 함께 지워져 배포(재생성) 전 로그를 볼 수 없었다.
+    # 용량은 journald 전역 상한(기본: 파일시스템의 10%, 최대 4G)과 90일 보존 상한이 막는다. `docker logs`는 지금 컨테이너 것만
+    # 보여 주고, 재생성 전 로그까지는 `journalctl -t <tag>`로 본다(consumer·worker도 같다).
     logging:
-      driver: json-file
+      driver: journald
       options:
-        max-size: "10m"   # 로그 무제한 누적으로 디스크 차는 것 방지
-        max-file: "3"
+        tag: moly-backend
     healthcheck:
       # slim 이미지에 curl 없음 — 파이썬 표준 라이브러리로 /health 확인
       test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=3).status == 200 else 1)"]
@@ -40,11 +42,12 @@ services:
     volumes:
       - ./secrets/fcm-service-account.json:/secrets/fcm-service-account.json:ro
     restart: "no"
+    # 틱 출력은 systemd 유닛 로그(`journalctl -u moly-worker.service`)에도 남는다. 이 사본은 유닛이
+    # 시간 상한에 걸려 `docker compose run`이 끊긴 뒤에도 컨테이너가 계속 쓰는 줄까지 남긴다.
     logging:
-      driver: json-file
+      driver: journald
       options:
-        max-size: "10m"
-        max-file: "3"
+        tag: moly-worker
 
   # 대화 후속 잡(기억·일기 색인·약속·관계·요약)을 처리하는 상주 consumer.
   # deploy.sh가 dev·prod 모두에서 consumer profile을 켜서 기동한다. 운영 EC2 두 대에서 동시에
@@ -61,7 +64,6 @@ services:
       - ./secrets/fcm-service-account.json:/secrets/fcm-service-account.json:ro
     restart: unless-stopped
     logging:
-      driver: json-file
+      driver: journald
       options:
-        max-size: "10m"
-        max-file: "3"
+        tag: moly-consumer

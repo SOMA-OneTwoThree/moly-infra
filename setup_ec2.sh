@@ -110,6 +110,13 @@ fi
 chmod +x "$INFRA_DIR/deploy.sh" 2>/dev/null || true
 
 # ---------------------------------------------------------------------------
+# 4-1. journald 보존 상한 (컨테이너 로그도 journald 드라이버로 여기에 남는다)
+# ---------------------------------------------------------------------------
+log "journald 보존 상한 설치 (원본: systemd/journald-moly.conf)"
+install -D -m 0644 "$INFRA_DIR/systemd/journald-moly.conf" /etc/systemd/journald.conf.d/moly.conf
+systemctl restart systemd-journald
+
+# ---------------------------------------------------------------------------
 # 5. nginx — ALB 전용 :8080 블록 (TLS 없음: ALB가 ACM으로 종료)
 # ---------------------------------------------------------------------------
 log "nginx 설치"
