@@ -36,7 +36,7 @@ host="$(clean "$(uname -n)")"
 when="$(TZ=Asia/Seoul date '+%Y-%m-%d %H:%M KST')"
 
 text="⚠️ [워커] 틱 비정상 종료 — result=${result} status=${status} · ${host} · ${when}"
-text="${text}\\n한 번의 실패는 다음 틱이 이어받는다. timeout이면 컨테이너는 끝까지 처리 중일 수 있다(그 로그는 journald에 남지 않음)."
+text="${text}\\n한 번의 실패는 다음 틱이 이어받는다. timeout이면 컨테이너는 끝까지 처리 중일 수 있다(그 뒤 로그: journalctl -t moly-worker)."
 payload="{\"text\":\"${text}\"}"
 
 if ! printf 'url = "%s"\n' "$url" \
