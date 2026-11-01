@@ -201,6 +201,21 @@ class DeployTests(unittest.TestCase):
                 self.assertNotIn('test-supabase-secret-key', run.stdout + run.stderr)
                 self.assertTrue(any(e['kind'] == 'systemctl' and e['args'][:2] == ['enable', '--now'] for e in events))
 
+    def test_meta_ads_read_configuration_is_optional_and_not_logged(self):
+        for environment in ['dev', 'prod']:
+            for configured in [False, True]:
+                with self.subTest(environment=environment, configured=configured):
+                    parameters = ({'meta-ads-account-id': '123',
+                                   'meta-ads-access-token': 'test-meta-read-secret',
+                                   'meta-ads-api-version': 'v26.0'} if configured else {})
+                    run, _, files = self.run_deploy({'environment': environment, 'parameters': parameters})
+                    self.assertEqual(run.returncode, 0, run.stderr)
+                    env = dict(line.split('=', 1) for line in files['backend.env'].splitlines())
+                    self.assertEqual(env['META_ADS_ACCOUNT_ID'], parameters.get('meta-ads-account-id', ''))
+                    self.assertEqual(env['META_ADS_ACCESS_TOKEN'], parameters.get('meta-ads-access-token', ''))
+                    self.assertEqual(env['META_ADS_API_VERSION'], 'v26.0')
+                    self.assertNotIn('test-meta-read-secret', run.stdout + run.stderr)
+
     def test_revenuecat_read_configuration_is_optional_and_not_logged(self):
         for environment in ['dev', 'prod']:
             for configured in [False, True]:
