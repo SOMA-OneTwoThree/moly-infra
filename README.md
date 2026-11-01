@@ -45,6 +45,11 @@ prod는 `fortune-ad-unit-ids`와 `slack-feedback-webhook-url`도 비어 있지 �
 옵션에는 FCM 설정, Slack 요약·알림·상태 webhook(dev의 사용자 피드백 webhook도 옵션), `health-token`,
 `worker-ping-url`, `meta-install-referrer-decryption-key`, `fcm-invalidate-dead-tokens`가 있다. 해당 SSM 키가 존재해도
 `backend.env`에 매핑되지 않으면 컨테이너에 전달되지 않는다.
+Meta 일일 광고 보고는 선택 설정 `meta-ads-account-id`, `meta-ads-access-token`
+(`ads_read` 권한, SecureString), `meta-ads-api-version`(기본 `v26.0`)을 쓴다.
+개발·운영 각각의 SSM 경로에 설정하며 토큰 값을 로그·PR·문서에 기록하지 않는다.
+미설정이면 광고 숫자를 0으로 표시하지 않고 연결 설정 필요로 표시한다.
+
 RevenueCat 조회용 `revenuecat-api-v2-key`(SecureString)와 `revenuecat-project-id`(String)도 옵션이다.
 각각 `REVENUECAT_API_V2_KEY`, `REVENUECAT_PROJECT_ID`로 전달되며, 미설정 시 빈 값이다.
 
