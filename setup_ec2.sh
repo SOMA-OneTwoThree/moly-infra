@@ -1,35 +1,29 @@
 #!/usr/bin/env bash
 #
-# setup_ec2.sh — moly-backend 스택을 위한 EC2 호스트 부트스트랩 (ALB + 2대 이중화 시대).
+# setup_ec2.sh: 새 EC2 서버를 ALB 뒤에서 서비스할 수 있는 상태로 준비한다.
 #
-# 새 EC2(Ubuntu 24.04, ap-northeast-2)를 ALB Target Group 뒤에서 서빙 가능한 상태로 재현한다.
-# 이 스크립트는 호스트 레벨 의존성(docker / aws cli / nginx / jq)만 설치하고,
-# moly-infra를 clone한 뒤 안내를 출력한다. 실제 앱 배포는 moly-infra/deploy.sh가 한다.
+# Docker, AWS CLI v2, nginx, jq를 설치하고 이 저장소를 /root/moly-infra에 clone한다.
+# nginx 설정과 journald 로그 보존 설정도 넣는다.
+# 앱 배포는 하지 않는다. 끝나면 출력되는 안내대로 첫 배포를 하고 Target Group에 등록한다.
 #
-# 현재 아키텍처 (2026-07 ALB 컷오버 이후):
-#   voice.moly.asia (가비아 CNAME) → ALB(443, ACM TLS 종료) → TG(HTTP:8080)
-#     → 각 EC2의 nginx :8080 → 127.0.0.1:8000 백엔드 컨테이너
-#   TLS는 ALB가 종료하므로 인스턴스에는 certbot/Let's Encrypt가 필요 없다.
-#   (레거시 EIP + nginx :443 + LE 경로는 2026-07-27 폐기 완료 — 어떤 인스턴스에도 만들지 않는다)
+# 요청 경로: ALB(443, ACM) → Target Group(HTTP 8080) → nginx :8080 → 127.0.0.1:8000
+# TLS는 ALB에서 끝나므로 서버에는 인증서를 설치하지 않는다.
 #
-# 전제:
-#   - Ubuntu 24.04, x86_64, IMDSv2
-#   - IAM 인스턴스 역할(moly-voice-ec2-role) 연결:
-#     SSM(Session/RunCommand) + Parameter Store 읽기(/moly/prod/*) + KMS 복호화 + ECR pull.
-#     (ECR pull 권한이 빠지면 deploy.sh의 ECR 로그인이 AccessDenied로 실패한다)
-#   - 보안 그룹: 인바운드 8080을 ALB SG(sg-0efceca4a4fece8ac)에서만 허용.
-#     80/443/22는 열지 않는다(접속은 SSM Session Manager).
-#   - EC2 태그 Role=moly-backend 필수 — GitHub Actions 롤링 배포가 이 태그로 대상을 발견한다.
-#     ⚠ 인스턴스를 늘리면 moly-backend .github/workflows/deploy.yml의 EXPECTED_INSTANCES도 같이 수정.
+# 전제 조건
+#   - Ubuntu 24.04 x86_64, IMDSv2
+#   - IAM 인스턴스 역할: SSM, Parameter Store 읽기, KMS 복호화, ECR pull
+#     ECR pull 권한이 없으면 deploy.sh의 ECR 로그인에서 실패한다.
+#   - 보안 그룹: 8080 포트를 ALB 보안 그룹에서만 허용한다. 접속은 SSM Session Manager로 하고
+#     80, 443, 22 포트는 열지 않는다.
+#   - EC2 태그 Role=moly-backend: 배포 workflow가 이 태그로 대상 서버를 찾는다.
+#     서버 수를 바꾸면 moly-backend deploy.yml의 EXPECTED_INSTANCES도 바꿔야 한다.
 #
-# 실행: sudo bash setup_ec2.sh
-#
-# 멱등성: 여러 번 실행해도 안전하도록 작성했다.
+# 실행: sudo bash setup_ec2.sh  (여러 번 실행해도 안전하다)
 
 set -euo pipefail
 
 # ---------------------------------------------------------------------------
-# 설정값 (필요 시 수정)
+# 설정값
 # ---------------------------------------------------------------------------
 INFRA_REPO="https://github.com/SOMA-OneTwoThree/moly-infra.git"
 INFRA_DIR="/root/moly-infra"
@@ -52,7 +46,7 @@ apt-get install -y --no-install-recommends \
   ca-certificates curl unzip jq git gnupg lsb-release
 
 # ---------------------------------------------------------------------------
-# 2. Docker (공식 apt 저장소 — Ubuntu 기본 docker.io 대신 최신 docker-ce + compose v2)
+# 2. Docker (compose v2가 필요해 Ubuntu의 docker.io 대신 공식 저장소에서 설치)
 # ---------------------------------------------------------------------------
 if ! command -v docker >/dev/null 2>&1; then
   log "Docker 공식 저장소 추가 및 설치"
@@ -75,7 +69,7 @@ docker --version
 docker compose version
 
 # ---------------------------------------------------------------------------
-# 3. AWS CLI v2 (apt의 v1이 아니라 공식 v2 — ECR 인증에 v2 권장)
+# 3. AWS CLI v2 (apt 패키지는 v1이라 공식 설치 파일 사용)
 # ---------------------------------------------------------------------------
 if ! command -v aws >/dev/null 2>&1; then
   log "AWS CLI v2 설치"
@@ -89,7 +83,7 @@ else
 fi
 aws --version
 
-# IAM 인스턴스 역할이 제대로 붙어 있는지 가볍게 확인 (실패해도 치명적 아님)
+# 인스턴스 역할이 연결됐는지 확인한다. 실패해도 설치는 계속한다.
 log "인스턴스 역할로 STS 자격 확인"
 if aws sts get-caller-identity --region "$AWS_REGION" >/dev/null 2>&1; then
   echo "    STS 자격 정상 (인스턴스 역할 연결됨)"
@@ -98,7 +92,7 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# 4. moly-infra clone (compose + deploy.sh + nginx 설정 원본)
+# 4. moly-infra clone
 # ---------------------------------------------------------------------------
 if [ ! -d "$INFRA_DIR/.git" ]; then
   log "moly-infra clone → $INFRA_DIR"
@@ -110,14 +104,14 @@ fi
 chmod +x "$INFRA_DIR/deploy.sh" 2>/dev/null || true
 
 # ---------------------------------------------------------------------------
-# 4-1. journald 보존 상한 (컨테이너 로그도 journald 드라이버로 여기에 남는다)
+# 4-1. journald 보존 기간 (컨테이너 로그도 journald에 쌓인다)
 # ---------------------------------------------------------------------------
 log "journald 보존 상한 설치 (원본: systemd/journald-moly.conf)"
 install -D -m 0644 "$INFRA_DIR/systemd/journald-moly.conf" /etc/systemd/journald.conf.d/moly.conf
 systemctl restart systemd-journald
 
 # ---------------------------------------------------------------------------
-# 5. nginx — ALB 전용 :8080 블록 (TLS 없음: ALB가 ACM으로 종료)
+# 5. nginx (ALB에서 오는 :8080 요청을 backend로 전달)
 # ---------------------------------------------------------------------------
 log "nginx 설치"
 apt-get install -y nginx
@@ -126,25 +120,23 @@ systemctl enable --now nginx
 log "ALB용 nginx 설정 설치 (:8080 → 127.0.0.1:8000, 원본: nginx/alb-8080.conf)"
 cp "$INFRA_DIR/nginx/alb-8080.conf" /etc/nginx/sites-available/alb-8080
 ln -sf /etc/nginx/sites-available/alb-8080 /etc/nginx/sites-enabled/alb-8080
-# Ubuntu 기본 default 사이트(:80)는 ALB 인스턴스에선 불필요 — 존재해도 무해하나 비활성화
+# 기본 사이트(:80)는 쓰지 않으므로 끈다.
 rm -f /etc/nginx/sites-enabled/default
 
 nginx -t
 systemctl reload nginx
 
 # ---------------------------------------------------------------------------
-# 6. 워커 마커 안내 (설치하지 않음 — 명시적 결정 사항)
+# 6. 워커 마커 안내
 # ---------------------------------------------------------------------------
-# 배치 워커(일기/푸시 틱)는 전체 플릿에서 정확히 1대에서만 돌아야 한다.
-# deploy.sh는 /etc/moly-worker-host 마커 파일이 있는 호스트에만 systemd timer를 설치하고,
-# 없는 호스트에서는 timer를 disable한다. 이 스크립트는 마커를 만들지 않는다 —
-# 워커 호스트를 지정하려면 해당 인스턴스에서 수동으로:
+# 배치 워커는 한 대에서만 돌아야 하므로 이 스크립트는 마커를 만들지 않는다. deploy.sh는
+# /etc/moly-worker-host가 있는 호스트에만 워커 타이머를 설치한다. 워커 호스트로 정한 서버에서만 만든다:
 #   sudo touch /etc/moly-worker-host
-# (기존 워커 호스트를 교체할 때는 이전 호스트의 마커를 먼저 지우고 deploy.sh를 재실행할 것)
+# 워커 호스트를 바꿀 때는 이전 호스트의 마커를 먼저 지우고 deploy.sh를 다시 실행한다.
 log "워커 마커(/etc/moly-worker-host): 설치 안 함 — 워커 호스트 지정은 수동 (위 주석 참조)"
 
 # ---------------------------------------------------------------------------
-# 7. SSM 에이전트 확인 (Ubuntu는 snap으로 사전 설치돼 있는 경우가 많음)
+# 7. SSM 에이전트 확인 (Ubuntu AMI에는 보통 snap으로 설치돼 있다)
 # ---------------------------------------------------------------------------
 log "SSM 에이전트 확인"
 if snap list amazon-ssm-agent >/dev/null 2>&1; then

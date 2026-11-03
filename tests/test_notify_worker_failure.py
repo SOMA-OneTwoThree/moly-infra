@@ -67,7 +67,7 @@ class FailureNoticeTests(unittest.TestCase):
         self.assertNotIn('hooks.example.test', run.stdout + run.stderr)
 
     def test_falls_back_to_shared_webhook_and_reads_unit_state(self):
-        # 운영처럼 상태 채널 전용 웹훅이 없으면 공용 웹훅(backend status 라우팅과 같다). MONITOR_* 없으면 systemctl.
+        # 상태 채널 웹훅이 없으면 공용 웹훅으로 보내고, MONITOR_* 값이 없으면 systemctl에서 읽는다.
         run, calls = self.run_notice([f'SLACK_ALERT_WEBHOOK_URL={ALERT}', f'SLACK_WEBHOOK_URL={SHARED}',
                                       'SLACK_STATUS_WEBHOOK_URL='])
         self.assertEqual(run.returncode, 0, run.stderr)

@@ -142,7 +142,7 @@ class DeployTests(unittest.TestCase):
             return runs[-1], events, files
 
     def test_preflight_only_validates_without_touching_live_state(self):
-        # workflow가 ALB에서 빼기 전에 돌리는 모드: pull·DB 계약 검증까지만, 실패해도 live는 그대로.
+        # ALB에서 빼기 전에 실행하는 모드. 통과하든 실패하든 live 파일은 그대로여야 한다.
         side_effects = ['up', 'inspect', 'consumer_probe', 'consumer_startup', 'remove_consumer',
                         'ready', 'nginx', 'systemctl', 'image', 'rmi', 'ps', 'logs']
         for case in [{}, {'schema_probe': 3}, {'schema_fail': 1}, {'schema_probe': 125},
@@ -215,7 +215,7 @@ class DeployTests(unittest.TestCase):
                     self.assertNotIn('test-rc-read-secret', run.stdout + run.stderr)
 
     def test_fcm_dead_token_switch_defaults_to_dry_run_and_rejects_other_values(self):
-        # 미설정이면 false(드라이런: 분류·로그만). true/false 외 값은 live env를 바꾸기 전에 중단한다.
+        # 미설정이면 false다. true, false 외의 값은 live env를 바꾸기 전에 중단해야 한다.
         for parameters, expected in [({}, 'false'), ({'fcm-invalidate-dead-tokens': 'true'}, 'true'),
                                      ({'fcm-invalidate-dead-tokens': 'false'}, 'false')]:
             with self.subTest(parameters=parameters):
@@ -294,7 +294,7 @@ class DeployTests(unittest.TestCase):
                 self.assertNotIn('배포 완료', run.stdout)
 
     def test_worker_host_installs_failure_notice_unit(self):
-        # 틱 실패 알림 유닛은 워커 호스트에만, 워커 유닛과 함께 설치된다(OnFailure 대상이 없으면 안 뜬다).
+        # 실패 알림 유닛은 워커 호스트에만 워커 유닛과 함께 설치돼야 한다.
         for worker in [True, False]:
             with self.subTest(worker=worker):
                 run, _, files = self.run_deploy({'worker': worker})
