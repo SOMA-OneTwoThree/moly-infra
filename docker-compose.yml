@@ -1,38 +1,32 @@
 services:
   backend:
-    # IMAGE_TAG/IMAGE_REPO는 deploy.sh가 생성하는 .env에서 온다(git-sha 고정).
-    # IMAGE_REPO 기본값 moly-backend = prod — IMAGE_REPO 줄이 없는 구 .env로도 prod가
-    # 기존과 동일하게 뜬다. dev 호스트만 deploy.sh가 moly-backend-dev를 써 넣는다.
-    # :latest 폴백은 첫 수동 기동용 — 평시엔 deploy.sh가 항상 .env를 만들어 둔다.
+    # IMAGE_TAG와 IMAGE_REPO는 deploy.sh가 만드는 .env에서 읽는다. IMAGE_REPO가 없으면 prod 저장소를 쓴다.
+    # :latest는 .env가 아직 없는 첫 수동 기동에서만 쓰인다.
     image: 676972757138.dkr.ecr.ap-northeast-2.amazonaws.com/${IMAGE_REPO:-moly-backend}:${IMAGE_TAG:-latest}
     container_name: moly-backend
     ports:
-      - "127.0.0.1:8000:8000"   # 루프백만 바인딩 — 외부는 ALB → nginx :8080을 통해서만
+      - "127.0.0.1:8000:8000"   # 외부 요청은 nginx :8080을 거쳐서만 들어온다
     env_file:
-      - ./backend.env           # deploy.sh가 SSM에서 생성 (git 제외)
+      - ./backend.env           # deploy.sh가 SSM 값으로 생성
     volumes:
-      # FCM 서비스 계정 JSON — deploy.sh가 SSM에서 파일로 생성.
-      # 파일이 없으면 컨테이너가 안 뜨므로 deploy.sh가 없을 때 빈 파일이라도 만든다.
+      # FCM 서비스 계정 파일. 파일이 없으면 컨테이너가 뜨지 않아서 deploy.sh가 빈 파일이라도 만든다.
       - ./secrets/fcm-service-account.json:/secrets/fcm-service-account.json:ro
     restart: unless-stopped
-    # 로그는 호스트 journald에 남긴다 — json-file은 컨테이너와 함께 지워져 배포(재생성) 전 로그를 볼 수 없었다.
-    # 용량은 journald 전역 상한(기본: 파일시스템의 10%, 최대 4G)과 90일 보존 상한이 막는다. `docker logs`는 지금 컨테이너 것만
-    # 보여 주고, 재생성 전 로그까지는 `journalctl -t <tag>`로 본다(consumer·worker도 같다).
+    # 로그는 호스트 journald에 남긴다. 컨테이너를 다시 만든 뒤에도 journalctl -t moly-backend로 볼 수 있다.
     logging:
       driver: journald
       options:
         tag: moly-backend
     healthcheck:
-      # slim 이미지에 curl 없음 — 파이썬 표준 라이브러리로 /health 확인
+      # slim 이미지에는 curl이 없어서 파이썬으로 확인한다.
       test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=3).status == 200 else 1)"]
       interval: 30s
       timeout: 5s
       retries: 3
       start_period: 15s
 
-  # 배치 워커 — 상주 아님. systemd timer(moly-worker.timer)가 15분마다
-  # `docker compose run --rm worker`로 1틱 실행(멱등). profiles 덕분에
-  # `up -d`로는 안 뜨고, run으로만 실행된다.
+  # 배치 워커. 상주하지 않고 moly-worker.timer가 15분마다 `docker compose run --rm worker`로 실행한다.
+  # worker profile에 속해 있어 `up -d`로는 뜨지 않는다.
   worker:
     image: 676972757138.dkr.ecr.ap-northeast-2.amazonaws.com/${IMAGE_REPO:-moly-backend}:${IMAGE_TAG:-latest}
     profiles: ["worker"]
@@ -42,17 +36,14 @@ services:
     volumes:
       - ./secrets/fcm-service-account.json:/secrets/fcm-service-account.json:ro
     restart: "no"
-    # 틱 출력은 systemd 유닛 로그(`journalctl -u moly-worker.service`)에도 남는다. 이 사본은 유닛이
-    # 시간 상한에 걸려 `docker compose run`이 끊긴 뒤에도 컨테이너가 계속 쓰는 줄까지 남긴다.
+    # systemd가 시간 제한으로 run을 끊은 뒤에도 컨테이너가 남기는 로그까지 journald에 보존한다.
     logging:
       driver: journald
       options:
         tag: moly-worker
 
-  # 대화 후속 잡(기억·일기 색인·약속·관계·요약)을 처리하는 상주 consumer.
-  # deploy.sh가 dev·prod 모두에서 consumer profile을 켜서 기동한다. 운영 EC2 두 대에서 동시에
-  # 떠도 잡을 나눠 갖는다(FOR UPDATE SKIP LOCKED) — 워커 틱과 달리 단일 호스트 제한이 없다.
-  # 이미지에 worker.consumer가 없으면(롤백 등) deploy.sh가 기동을 건너뛴다.
+  # 대화 이후의 비동기 작업을 처리하는 상주 consumer. deploy.sh가 consumer profile로 띄운다.
+  # 작업을 FOR UPDATE SKIP LOCKED로 나눠 가져가므로 워커와 달리 모든 서버에서 실행한다.
   consumer:
     image: 676972757138.dkr.ecr.ap-northeast-2.amazonaws.com/${IMAGE_REPO:-moly-backend}:${IMAGE_TAG:-latest}
     container_name: moly-consumer

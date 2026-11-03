@@ -33,11 +33,11 @@ class ComposeLoggingTests(unittest.TestCase):
                 block = services[service]
                 self.assertIn('      driver: journald', block.splitlines())
                 self.assertIn(f'        tag: {tag}', block.splitlines())
-        # json-file 로그는 컨테이너와 함께 지워진다 — 다시 섞이면 재생성 전 로그를 잃는다.
+        # json-file 로그는 컨테이너와 함께 지워지므로 다시 쓰지 않는다.
         self.assertNotIn('driver: json-file', compose)
 
     def test_operator_hints_name_the_same_tag(self):
-        # 실패 알림·유닛 주석이 가리키는 조회 명령이 compose 태그와 어긋나지 않게 한다.
+        # 실패 알림과 유닛 주석에 적힌 조회 명령이 compose 로그 태그와 같아야 한다.
         hint = 'journalctl -t moly-worker'
         self.assertIn(hint, (ROOT / 'scripts/notify-worker-failure.sh').read_text())
         self.assertIn(hint, (ROOT / 'systemd/moly-worker.service').read_text())

@@ -1,138 +1,82 @@
 # moly-infra
 
-moly-backend의 ECR 이미지를 EC2에서 실행하는 인프라 원본이다. 이미지 빌드와 호스트별 롤링
-배포 순서는 moly-backend의 `.github/workflows/deploy.yml`과 `deploy-dev.yml`이 소유한다.
-이 저장소의 `deploy.sh`는 한 호스트를 배포한다.
+BeCappy 백엔드를 AWS에서 운영하기 위한 배포 스크립트와 서버 설정입니다.
 
-## 실행 구조
+이미지 빌드와 배포 순서는 [moly-backend](https://github.com/SOMA-OneTwoThree/moly-backend)의 GitHub Actions가 관리하고, 이 저장소는 각 서버 안에서 실행되는 부분을 맡습니다.
 
-HTTPS → ALB(ACM TLS 종료) → nginx `:8080` → API `127.0.0.1:8000`.
-nginx 원본은 `nginx/alb-8080.conf`이며 `setup_ec2.sh`가 설치한다. 인스턴스에 별도 TLS 인증서를
-설치하지 않는다. nginx 수정 시에는 원본과 호스트 설정을 함께 갱신하고 `nginx -t`로 검증한다.
+## 아키텍처
 
-| 구성 | 실행 계약 |
-|---|---|
-| `backend` | API 상주 프로세스. 외부에 컨테이너 포트를 직접 열지 않는다 |
-| `worker` | `moly-worker.timer`가 매시 :00·:15·:30·:45에 1틱 실행. 최대 14분. 실패하면 `moly-worker-failed.service`가 상태 채널에 한 줄 알림 |
-| `consumer` | 대화 후속 잡을 상주 처리. 각 호스트에서 `SKIP LOCKED`로 잡을 나눠 처리 |
-| `/etc/moly-worker-host` | 이 파일이 있는 호스트에서만 배치 타이머 설치·활성화 |
-| `/etc/moly-env` | 없음: prod. 내용 `dev`: dev. 빈 값·잘못된 값·읽기 실패: 배포 중단 |
+```mermaid
+flowchart TB
+    app["BeCappy 앱"] -->|HTTPS| alb["ALB"]
+    alb --> nginx1
+    alb --> nginx2
 
-동일 환경의 배치 워커는 한 호스트에만 둔다. 이전 호스트의 마커를 제거하고 재배포해 타이머를
-중지한 다음 새 호스트에 마커를 생성하고 배포한다. consumer에는 이 마커 제한이 없다.
+    subgraph ec2a["EC2 1"]
+        nginx1["nginx :8080"] --> api1["backend :8000"]
+        consumer1["consumer"]
+        worker["worker"]
+    end
 
-## 환경과 설정
+    subgraph ec2b["EC2 2"]
+        nginx2["nginx :8080"] --> api2["backend :8000"]
+        consumer2["consumer"]
+    end
 
-| 환경 | SSM 경로 | ECR 저장소 | `ENVIRONMENT` |
-|---|---|---|---|
-| prod | `/moly/prod/` | `moly-backend` | `production` |
-| dev | `/moly/dev/` | `moly-backend-dev` | `development` |
-
-개발 호스트에서는 `echo dev | sudo tee /etc/moly-env`로 내용을 기록한다.
-prod 호스트에는 마커 파일이 필요 없다. 환경별 Supabase Auth와 데이터 프로젝트는 분리된
-현재 구성을 사용한다. 배너 검증 계정도 dev 프로젝트의 계정이다.
-
-SSM 값은 EC2 IAM 역할로 조회한다. `deploy.sh`가 `.env`, `backend.env`,
-`secrets/fcm-service-account.json`을 생성하므로 이 파일들을 직접 편집하지 않는다.
-환경변수의 정확한 이름·기본값·매핑은 `deploy.sh`가 원본이다.
-
-필수 SSM 키:
-`anthropic-api-key`, `openai-api-key`, `supabase-db-connection-string`, `supabase-url`,
-`supabase-publishable-key`, `supabase-secret-key`, `revenuecat-webhook-auth`.
-prod는 `fortune-ad-unit-ids`와 `slack-feedback-webhook-url`도 비어 있지 않아야 한다. dev의 빈 운세 광고 allowlist는 배포를
-허용하지만 해당 광고 보상은 서버에서 거부한다.
-
-옵션에는 FCM 설정, Slack 요약·알림·상태 webhook(dev의 사용자 피드백 webhook도 옵션), `health-token`,
-`worker-ping-url`, `meta-install-referrer-decryption-key`, `fcm-invalidate-dead-tokens`가 있다. 해당 SSM 키가 존재해도
-`backend.env`에 매핑되지 않으면 컨테이너에 전달되지 않는다.
-RevenueCat 조회용 `revenuecat-api-v2-key`(SecureString)와 `revenuecat-project-id`(String)도 옵션이다.
-각각 `REVENUECAT_API_V2_KEY`, `REVENUECAT_PROJECT_ID`로 전달되며, 미설정 시 빈 값이다.
-
-대화 컨텍스트·checkpoint·agent와 운세·운세 대화 기능은 dev·prod에서 켠다.
-위험한 개발 라우트와 개발 운영자 계정 설정은 dev에만 넣는다.
-
-## 배포와 롤백
-
-1. backend의 dev/main 브랜치 배포 workflow가 해당 환경의 이미지를 빌드한다.
-2. prod workflow는 기본 2대를 확인하고, 먼저 모든 호스트에서
-   `sudo env DEPLOY_PREFLIGHT_ONLY=1 bash deploy.sh <image-tag>`로 사전점검한 뒤 ALB에서 한 호스트씩
-   제외한다. 사전점검이 하나라도 실패하면 어떤 호스트도 제외하지 않는다. dev는 별도 태그의 1대에
-   중단 배포하며 ALB를 조작하지 않는다.
-3. 해당 호스트에서 infra를 갱신하고 `bash deploy.sh <image-tag>`를 실행한다.
-4. prod는 호스트·외부 경로 검증 후 ALB에 다시 등록하고 다음 호스트를 처리한다.
-   dev 태그는 `dev-<sha>`, prod 태그는 `<sha>`다.
-
-`deploy.sh`의 실행 순서는 ECR 로그인 → SSM 조회 → 후보 env·FCM 생성 → 이미지 pull → DB preflight
-→ live FCM·env 교체 → API·consumer 기동 → 헬스·이미지·nginx 검사 → 워커 타이머 갱신이다.
-이미지 pull·DB preflight 실패 시 live `.env`·`backend.env`·FCM 자격증명 파일을 교체하지 않는다.
-`DEPLOY_PREFLIGHT_ONLY=1`이면 DB preflight까지만 하고 후보 파일을 지운 뒤 끝낸다 — live 파일·컨테이너·
-워커 타이머는 그대로다. 값은 `0`·`1`만 받는다(그 밖의 값은 아무것도 하기 전에 실패).
-FCM 반영은 기존 bind mount의 파일 inode를 유지한다. 이 단계 이후의 컨테이너 기동 실패까지
-모든 파일을 자동으로 원복하는 것은 아니며, 운영 롤백 절차로 처리한다.
-
-이미지 SHA를 인자로 전달하는 것이 표준이다. 인자를 생략하면 마지막 `.env`의 태그를 재사용한다.
-아직 기록된 태그도 없으면 현재 구현은 `latest`로 폴백하므로 첫 배포에도 검증한 SHA를 명시한다.
-이미지는 호스트에서 해당 저장소의 최근 3개 태그를 유지하며, 사용 중인 이미지는 제거되지 않는다.
-
-운영 롤백은 backend 배포 workflow의 `workflow_dispatch`에서 기존 `image_tag`를 지정한다.
-workflow의 ALB 제외·복귀 절차를 그대로 사용한다. 호스트의 `deploy.sh`를 단독 실행하는 것은
-전체 플릿의 롤링 배포가 아니다.
-
-구 이미지에 `worker.consumer`가 없으면 consumer를 건너뛰고 남은 consumer 컨테이너를 제거한다.
-모듈이 있으면 실제 핸들러 등록까지 검사한다. 이 분기는 구 이미지로 롤백할 때도 유지하는 계약이다.
-
-## DB 계약
-
-DB 구조 원본은 moly-backend의 `db/schema.sql`이다. 기존 DB 변경은 검토한 SQL을 수동으로
-적용하고 검증한다. 배포 스크립트는 DB를 변경하지 않는다.
-
-새 이미지의 `python -m db.schema_contract`가 해당 이미지에 포함된 스키마 계약을 읽어
-실제 DB의 컬럼·제약·인덱스·함수·트리거·RLS·권한을 검사한다. 새 테이블 추가는 구 이미지
-롤백을 막지 않으며, 기존 객체의 제약 변경·누락·권한 확대는 실패한다.
-
-검증 모듈이 없는 구 이미지로 롤백할 때는 `scripts/verify_fortune_schema.py`로 당시 운세
-테이블·권한·광고 만료·메시지 제약·인덱스를 검사한다. 파일 checksum이나 적용 원장 행은
-요구하지 않는다. 검증 실패 시 후보 컨테이너 기동 전에 중단한다.
-
-## 호스트 구성과 점검
-
-`setup_ec2.sh`는 Ubuntu 24.04 x86_64에 Docker/Compose, AWS CLI, nginx와 저장소를 설치한다.
-SG는 ALB에서 오는 8080만 허용하고 접속은 SSM을 사용한다. 워커 마커는 자동 생성하지 않는다.
-호스트를 추가하면 backend workflow의 대상 수·태그·Target Group도 함께 확인한다.
-
-```bash
-docker compose --env-file /root/moly-infra/.env -f /root/moly-infra/docker-compose.yml ps
-curl -fsS http://127.0.0.1:8000/health/ready
-curl -fsS http://127.0.0.1:8080/health
-systemctl list-timers moly-worker.timer
-systemctl status moly-worker.service
-journalctl -u moly-worker.service -n 100
-journalctl -t moly-backend --since "1 hour ago"
+    api1 --> db[("Supabase PostgreSQL")]
+    consumer1 --> db
+    worker --> db
+    api2 --> db
+    consumer2 --> db
 ```
 
-`/health/ready`는 DB 연결, `/health`의 version은 이미지 버전 확인에 사용한다.
-외부 경로 장애는 ALB 대상 상태 → nginx `:8080` → API readiness 순으로 확인한다.
-배포 실패 시에는 workflow 출력과 해당 호스트의 컨테이너·systemd 로그를 확인한다.
+ALB가 HTTPS를 처리하고 두 서버로 요청을 나눕니다. 서버에는 SSH 대신 SSM Session Manager로 접속합니다.
 
-컨테이너 로그는 compose의 journald 드라이버로 호스트 journald에 남는다.
-- 배포로 컨테이너가 다시 만들어져도 이전 로그를 `journalctl -t moly-backend`(`moly-consumer`, `moly-worker`)로 볼 수 있다. `docker logs`는 지금 컨테이너의 로그만 보여 준다
-- 용량은 journald 전역 상한(기본: 파일시스템의 10%, 최대 4G)을 따르고, 넘으면 오래된 로그부터 지워진다. 보존 기간은 90일 상한이다(`systemd/journald-moly.conf`, `setup_ec2.sh`가 설치)
-- 워커 틱 출력은 유닛 로그(`-u moly-worker.service`)와 `-t moly-worker` 양쪽에 남는다. 유닛이 시간 상한에 걸린 뒤 컨테이너가 쓴 줄은 `-t moly-worker`에만 있다
-- 컨테이너 줄은 dockerd가 보내므로 `journalctl -u docker.service`에도 섞인다. 데몬 로그만 볼 때는 `-t dockerd`를 쓴다
+컨테이너는 모두 같은 이미지에서 실행됩니다.
 
-### 아침 일기 푸시 활성화
+| 서비스 | 역할 |
+|---|---|
+| `backend` | FastAPI 앱. 포트를 127.0.0.1에만 열어서 외부 요청은 같은 EC2의 nginx를 거쳐서만 들어옵니다. |
+| `consumer` | 대화 이후의 비동기 작업(기억, 요약, 일기 임베딩 등)을 처리합니다. 작업은 DB 테이블에 쌓이고, 두 서버가 `FOR UPDATE SKIP LOCKED`로 겹치지 않게 나눠 가져갑니다. |
+| `worker` | systemd 타이머가 15분마다 실행하는 배치 작업(일기 생성, 푸시 알림)입니다. 같은 작업이 두 번 돌지 않도록 한 서버에서만 실행합니다. |
 
-- 환경별 `/moly/dev/morning-push-enabled`, `/moly/prod/morning-push-enabled` 옵션을 `backend.env`의 `MORNING_PUSH_ENABLED`에 전달한다
-- 값은 `true` 또는 `false`만 허용하며 미설정은 `false`다. 잘못된 값은 기존 env 교체 전에 배포를 중단한다
-- 설정만 바꿔서는 반영되지 않는다. 해당 환경의 배포를 통해 env를 갱신해야 한다
-- 대상 일기 판정과 알림 ID를 포함하는 backend 및 대응 클라이언트를 검증한 뒤 개발→운영 순서로 별도 활성화한다
-- 이번 코드 변경은 SSM 값을 생성·변경하거나 실제 발송을 활성화하지 않는다
-- 끌 때도 `false`로 설정한 뒤 해당 환경을 재배포한다. 이미 FCM이 수락한 메시지는 서버에서 회수할 수 없다
+시크릿은 저장소에 두지 않고, 배포할 때 SSM Parameter Store에서 읽어 서버의 env 파일로 만듭니다. 이미지는 커밋 SHA 태그로 ECR에 올라가기 때문에 서버마다 pull 시점이 달라도 같은 이미지를 실행합니다.
 
-### FCM 무효 토큰 비활성 표시
+개발 서버 1대도 같은 스크립트를 씁니다. 서버의 `/etc/moly-env` 파일로 환경을 구분해 SSM 경로와 ECR 저장소를 고릅니다.
 
-- 환경별 `/moly/dev/fcm-invalidate-dead-tokens`, `/moly/prod/fcm-invalidate-dead-tokens` 옵션을 `backend.env`의 `FCM_INVALIDATE_DEAD_TOKENS`에 전달한다
-- 값은 `true` 또는 `false`만 허용하며 미설정은 `false`(드라이런 — 분류·로그만)다. 잘못된 값은 기존 env 교체 전에 배포를 중단한다
-- `true`면 워커가 FCM이 무효로 확정한 토큰(`UNREGISTERED`)에 `user_devices.invalidated_at`을 기록하고 이후 발송에서 건너뛴다. 행은 지우지 않으며, 앱이 같은 토큰을 다시 등록하면 다시 발송 대상이 된다
-- 설정만 바꿔서는 반영되지 않는다. 해당 환경을 재배포해야 한다. 끌 때도 `false`로 설정한 뒤 재배포한다
-- 켜기 전 드라이런 확인과 되돌리기는 moly-backend `docs/OPERATIONS.md`를 따른다
+## 배포 흐름
+
+moly-backend의 main 브랜치에 머지되면 GitHub Actions가 아래 순서로 배포합니다. 각 서버에서는 SSM Run Command로 이 저장소를 pull 받은 뒤 `deploy.sh`를 실행합니다.
+
+```mermaid
+%%{init: {"sequence": {"mirrorActors": false}}}%%
+sequenceDiagram
+    participant GA as GitHub Actions
+    participant ALB
+    participant EC2 as EC2 (서버마다)
+
+    GA->>GA: 이미지 빌드, ECR push
+    GA->>EC2: 사전점검 (이미지 pull, DB 스키마 검증)
+    Note over GA,EC2: 한 대라도 실패하면 여기서 중단
+    loop 한 대씩
+        GA->>ALB: 대상에서 제외, 처리 중인 요청 대기
+        GA->>EC2: deploy.sh 실행
+        GA->>ALB: 다시 등록, healthy 대기
+    end
+```
+
+사전점검은 서버를 ALB에서 빼기 전에 모든 서버에서 먼저 실행합니다. DB 스키마와 맞지 않는 이미지는 서비스에 영향을 주기 전에 걸러집니다. 이후에는 서버를 한 대씩 교체하므로 배포 중에도 다른 서버가 요청을 받습니다.
+
+배포 중에 실패하면 그 서버는 ALB에서 빠진 채로 남고 workflow가 멈춥니다. 아직 배포하지 않은 서버는 이전 버전으로 계속 동작합니다. 롤백은 workflow를 수동으로 실행하면서 `image_tag`에 이전 커밋의 전체 SHA를 넣으면 됩니다.
+
+dev 브랜치에 머지하면 개발 서버에 ALB 없이 바로 배포됩니다.
+
+### deploy.sh
+
+서버 한 대에서는 다음 순서로 진행합니다.
+
+ECR 로그인 → SSM 조회 → 이미지 pull → DB 스키마 검증 → 설정 파일 교체 → 컨테이너 실행 → 배포 확인 → 워커 타이머 갱신
+
+새 설정은 임시 파일로 먼저 만들고, DB 검증까지 통과한 뒤에 실제 파일과 바꿉니다. 그 전에 실패하면 실행 중인 서비스는 이전 설정 그대로입니다.
+
+배포 확인 단계에서는 DB 연결까지 보는 `/health/ready`, 실제로 뜬 이미지 태그, consumer 상태, nginx를 거친 응답을 봅니다. 하나라도 실패하면 배포를 실패로 처리하고, 그 서버는 ALB에 다시 등록되지 않습니다.
