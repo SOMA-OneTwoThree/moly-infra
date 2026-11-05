@@ -4,6 +4,7 @@ Run on Linux/Bash >=4: python3 -m unittest discover -s tests -v
 Only absolute host paths are redirected into a TemporaryDirectory. Service commands
 are stubs, while the actual shell branching, env writing and file promotion execute.
 """
+import base64
 import json
 import os
 from pathlib import Path
@@ -25,7 +26,8 @@ def event(kind):
         f.write(json.dumps({'kind':kind,'args':args,
           'live':(root/'backend.env').read_text()})+'\n')
 def fail(key):
-    sys.exit(case.get(key,0))
+    code=case.get(key,0)
+    if code: sys.exit(code)
 if name=='aws':
     if args[:2]==['ecr','get-login-password']: event('ecr_login');print('test-ecr-password')
     elif args[:2]==['ssm','get-parameters-by-path']:
@@ -53,7 +55,8 @@ elif name=='df': print('Use%\n40%')
 elif name=='sleep': pass
 elif name=='systemctl':
     event('systemctl')
-    if args[0]=='is-active': print('active')
+    if args[0]=='is-active':
+        print('inactive' if case.get('crypto_supported') and args[-1]=='moly-worker.service' else 'active')
 elif name=='curl':
     event('ready' if ':8000/' in args[-1] else 'nginx')
     fail('ready_fail' if ':8000/' in args[-1] else 'nginx_fail')
@@ -74,11 +77,26 @@ elif name=='docker':
             assert args[args.index('--env-file')+1].endswith('backend.env.next')
             fail('schema_fail')
         elif args[-1]=='-':
-            event('fallback_schema');sys.stdin.read()
+            incoming=sys.stdin.read()
+            if 'chat_content_encryption_state' in incoming:
+                event('crypto_floor');fail('crypto_floor_fail')
+                print(json.dumps({'supported':case.get('crypto_supported',False),'started':False,'state_present':True}))
+                sys.exit(0)
+            event('fallback_schema')
             assert args[args.index('--env-file')+1].endswith('backend.env.next')
             fail('schema_fail')
+        elif 'scripts/check_chat_content_crypto.py' in args:
+            event('crypto_proof');fail('crypto_proof_fail')
+            print(json.dumps({'capability':'chat-content-aead-v1','environment':('development' if case.get('environment')=='dev' else 'production'),
+              'version':args[-1],'started':False,'format_version':1,'active_key_id':1,
+              'key_fingerprints':{'1':'a'*64},'schema':'ok','self_test':'ok'}))
         elif args[-1]=='worker.consumer': event('consumer_startup');fail('startup_fail')
         else: raise AssertionError(args)
+    elif args[0]=='exec' and 'scripts/check_chat_content_crypto.py' in args:
+        event('crypto_runtime');fail('crypto_runtime_fail')
+        print(json.dumps({'capability':'chat-content-aead-v1','environment':('development' if case.get('environment')=='dev' else 'production'),
+          'version':args[-1],'started':False,'format_version':1,'active_key_id':1,
+          'key_fingerprints':{'1':'a'*64},'schema':'ok','self_test':'ok'}))
     elif args[0]=='inspect':
         event('inspect')
         if '.State.Status' in args[2]: print(case.get('consumer_state','running'))
@@ -125,7 +143,7 @@ class DeployTests(unittest.TestCase):
             env = dict(os.environ, PATH=str(root / 'bin') + ':' + os.environ['PATH'],
                        DEPLOY_TEST_ROOT=str(root), DEPLOY_TEST_CASE=json.dumps(case))
             env.update(extra_env or {})
-            args = ['bash', str(root / 'deploy.sh'), 'candidate-image']
+            args = [os.environ.get('MOLY_TEST_BASH', 'bash'), str(root / 'deploy.sh'), case.get('image_tag','candidate-image')]
             runs = []
             for _ in range(2 if twice else 1):
                 runs.append(subprocess.run(args, env=env, text=True, capture_output=True, timeout=30))
@@ -140,6 +158,41 @@ class DeployTests(unittest.TestCase):
             files['hash_written'] = (state / 'backend.hash').exists()
             files['units'] = sorted(p.name for p in (root / 'host/systemd/system').iterdir())
             return runs[-1], events, files
+
+    def crypto_case(self, **updates):
+        value={'environment':'development','keys':{'1':base64.b64encode(b'x'*32).decode()}}
+        return {'environment':'dev','image_tag':'dev-'+'a'*40,'crypto_supported':True,
+                'parameters':{'chat-content-keyring':json.dumps(value,indent=2)+'\n'},**updates}
+
+    def test_crypto_candidate_and_both_runtime_roles_are_checked(self):
+        run,events,files=self.run_deploy(self.crypto_case(worker=True))
+        self.assertEqual(run.returncode,0,run.stderr)
+        kinds=[e['kind'] for e in events]
+        self.assertEqual(kinds.count('crypto_floor'),1)
+        self.assertEqual(kinds.count('crypto_proof'),1)
+        self.assertEqual(kinds.count('crypto_runtime'),2)
+        self.assertLess(kinds.index('crypto_proof'),kinds.index('up'))
+        line=next(x for x in files['backend.env'].splitlines() if x.startswith('CHAT_CONTENT_ENCRYPTION_KEYS='))
+        parsed=json.loads(line.split('=',1)[1])
+        self.assertEqual(parsed['environment'],'development')
+        self.assertNotIn(parsed['keys']['1'],run.stdout+run.stderr)
+
+    def test_crypto_preflight_failures_preserve_live_files_and_timer(self):
+        for failure in ('crypto_floor_fail','crypto_proof_fail'):
+            with self.subTest(failure=failure):
+                run,events,files=self.run_deploy(self.crypto_case(**{failure:1}))
+                self.assertNotEqual(run.returncode,0)
+                self.assertEqual(files['backend.env'],'OLD_ENV=keep\n')
+                self.assertNotIn('up',[e['kind'] for e in events])
+                self.assertNotIn('systemctl',[e['kind'] for e in events])
+
+    def test_crypto_runtime_failure_restores_timer_and_fails(self):
+        run,events,_=self.run_deploy(self.crypto_case(crypto_runtime_fail=1))
+        self.assertNotEqual(run.returncode,0)
+        calls=[e['args'] for e in events if e['kind']=='systemctl']
+        self.assertIn(['stop','moly-worker.timer'],calls)
+        self.assertIn(['start','moly-worker.timer'],calls)
+        self.assertNotIn('배포 완료',run.stdout)
 
     def test_preflight_only_validates_without_touching_live_state(self):
         # ALB에서 빼기 전에 실행하는 모드. 통과하든 실패하든 live 파일은 그대로여야 한다.
