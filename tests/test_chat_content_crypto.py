@@ -53,6 +53,28 @@ class FloorTests(unittest.TestCase):
         self.assertNotIn('\n',compact)
         self.assertEqual(json.loads(compact),value)
 
+    def test_raw_standard_key_wraps_only_key_one_and_exact_environment(self):
+        encoded=base64.b64encode(b'x'*32).decode()
+        for environment in ('development','production'):
+            for raw in (encoded, ' \r\n'+encoded+'\n'):
+                with self.subTest(environment=environment,raw_length=len(raw)):
+                    self.assertEqual(json.loads(module.normalize_keyring(raw,environment=environment)),
+                        {'environment':environment,'keys':{'1':encoded}})
+
+    def test_raw_key_extension_does_not_admit_scalar_malformed_or_noncanonical_values(self):
+        encoded=base64.b64encode(b'x'*32).decode()
+        cases=[json.dumps(encoded), encoded.rstrip('='), encoded+'=',
+               encoded[:10]+'\n'+encoded[10:],
+               base64.b64encode(b'x'*31).decode(),
+               base64.b64encode(b'x'*33).decode(),
+               encoded[:-2]+'h=',
+               base64.urlsafe_b64encode(b'\xff'*32).decode(),
+               '{"environment":"development","keys":{',
+               json.dumps({'environment':'production','keys':{'1':encoded}})]
+        for raw in cases:
+            with self.subTest(raw_length=len(raw)),self.assertRaises(ValueError):
+                module.normalize_keyring(raw,environment='development')
+
     def test_invalid_keyring_never_exposes_input_or_parser_error(self):
         good=base64.b64encode(b'x'*32).decode()
         cases=['{secret-canary',

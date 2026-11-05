@@ -28,7 +28,16 @@ def normalize_keyring(raw, *, environment):
         return result
     if len(raw) > 65_536:
         raise ValueError('invalid_keyring')
-    value = json.loads(raw, object_pairs_hook=pairs)
+    # A manually registered standard Base64 key is the single-key input form.
+    # JSON scalars and malformed JSON are never reinterpreted as key material.
+    single = raw.strip()
+    if re.fullmatch(r'[A-Za-z0-9+/]{43}=', single):
+        key = base64.b64decode(single, validate=True)
+        if len(key) != 32 or base64.b64encode(key).decode('ascii') != single:
+            raise ValueError('invalid_keyring')
+        value = {'environment': environment, 'keys': {'1': single}}
+    else:
+        value = json.loads(raw, object_pairs_hook=pairs)
     if (not isinstance(value, dict) or set(value) != {'environment', 'keys'}
             or value['environment'] != environment
             or not isinstance(value['keys'], dict) or not value['keys']):

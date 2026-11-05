@@ -177,6 +177,16 @@ class DeployTests(unittest.TestCase):
         self.assertEqual(parsed['environment'],'development')
         self.assertNotIn(parsed['keys']['1'],run.stdout+run.stderr)
 
+    def test_raw_ssm_key_is_wrapped_before_candidate_and_runtime_checks(self):
+        encoded=base64.b64encode(b'x'*32).decode()
+        case=self.crypto_case(parameters={'chat-content-keyring':' \n'+encoded+'\n'})
+        run,events,files=self.run_deploy(case)
+        self.assertEqual(run.returncode,0,run.stderr)
+        line=next(x for x in files['backend.env'].splitlines() if x.startswith('CHAT_CONTENT_ENCRYPTION_KEYS='))
+        self.assertEqual(json.loads(line.split('=',1)[1]),{'environment':'development','keys':{'1':encoded}})
+        self.assertEqual([e['kind'] for e in events].count('crypto_runtime'),2)
+        self.assertNotIn(encoded,run.stdout+run.stderr)
+
     def test_crypto_preflight_failures_preserve_live_files_and_timer(self):
         for failure in ('crypto_floor_fail','crypto_proof_fail'):
             with self.subTest(failure=failure):
