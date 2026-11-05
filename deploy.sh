@@ -59,6 +59,15 @@ case "$PREFLIGHT_ONLY" in
   0|1) ;;
   *) printf "ERROR: DEPLOY_PREFLIGHT_ONLY 값이 0|1 이 아닙니다: %q\n" "$PREFLIGHT_ONLY" >&2; exit 1 ;;
 esac
+CRYPTO_BOOTSTRAP="${DEPLOY_CRYPTO_BOOTSTRAP:-0}"
+CRYPTO_EXPAND="${DEPLOY_CRYPTO_EXPAND:-0}"
+case "$CRYPTO_BOOTSTRAP:$CRYPTO_EXPAND" in
+  0:0|1:0|1:1) ;;
+  *) echo "ERROR: crypto bootstrap flags must be explicit 0|1 with expand requiring bootstrap" >&2; exit 1 ;;
+esac
+if [ "$CRYPTO_BOOTSTRAP" = 1 ] && [ "$PREFLIGHT_ONLY" != 1 ]; then
+  echo "ERROR: crypto bootstrap requires preflight-only mode" >&2; exit 1
+fi
 if [ "$PREFLIGHT_ONLY" = "1" ]; then
   echo "==> 사전점검 전용 모드 — 이미지 pull·DB 계약 검증까지만 하고 live 파일·컨테이너는 바꾸지 않는다"
 fi
@@ -66,7 +75,7 @@ fi
 echo "==> moly-backend 배포 시작 (region=$REGION, account=$ACCOUNT_ID, env=$ENV_NAME)"
 
 # 필요한 명령 확인
-for bin in docker aws jq curl; do
+for bin in docker aws jq curl python3; do
   if ! command -v "$bin" >/dev/null 2>&1; then
     echo "ERROR: 필수 명령어 '$bin' 를 PATH에서 찾을 수 없습니다" >&2
     exit 1
@@ -173,6 +182,17 @@ esac
 
 echo "==> env 파일 작성"
 umask 077
+# Optional for pre-encryption images. A capable candidate's checker below
+# requires a valid keyring even before first adoption. Never echo its value.
+CRYPTO_FLOOR="$SCRIPT_DIR/scripts/verify_chat_content_floor.py"
+CHAT_CONTENT_ENCRYPTION_KEYS="${PARAMS[chat-content-keyring]:-}"
+if [ -n "$CHAT_CONTENT_ENCRYPTION_KEYS" ]; then
+  if ! CHAT_CONTENT_ENCRYPTION_KEYS="$(printf '%s' "$CHAT_CONTENT_ENCRYPTION_KEYS" \
+      | python3 "$CRYPTO_FLOOR" --normalize-keyring --environment "$APP_ENV" 2>/dev/null)"; then
+    echo "ERROR: chat_content_keyring_invalid" >&2
+    exit 1
+  fi
+fi
 
 # backend.env에는 여기 적은 키만 들어간다. SSM에 값을 추가해도 이 목록에 없으면 컨테이너에 전달되지 않는다.
 # 기본값이 빈 키(:-)는 없어도 배포가 계속되는 선택 설정이다. 운세 광고 단위 ID와 피드백 웹훅은
@@ -180,6 +200,7 @@ umask 077
 # 대화 기능과 운세 플래그는 모든 환경에서 켠다. 아침 푸시와 FCM 토큰 정리는 위에서 읽은 SSM 값을 따른다.
 cat > "$NEXT_BACKEND_ENV_FILE" <<EOF
 ENVIRONMENT=${APP_ENV}
+CHAT_CONTENT_ENCRYPTION_KEYS=${CHAT_CONTENT_ENCRYPTION_KEYS}
 REVENUECAT_WEBHOOK_AUTH=${PARAMS[revenuecat-webhook-auth]}
 REVENUECAT_API_V2_KEY=${PARAMS[revenuecat-api-v2-key]:-}
 REVENUECAT_PROJECT_ID=${PARAMS[revenuecat-project-id]:-}
@@ -254,21 +275,85 @@ if [ "$new_backend_hash" != "$old_backend_hash" ]; then RECREATE+=("backend"); f
 echo "==> 이미지 pull"
 docker compose --env-file "$NEXT_COMPOSE_ENV_FILE" -f "$COMPOSE_FILE" pull
 
+BACKEND_IMAGE="$ECR_REGISTRY/$IMAGE_REPO:$IMAGE_TAG"
+if [ "$CRYPTO_BOOTSTRAP" = 1 ]; then
+  trap 'rm -f "$NEXT_FCM_FILE" "$NEXT_BACKEND_ENV_FILE" "$NEXT_COMPOSE_ENV_FILE"' EXIT
+  if [[ ! "${IMAGE_TAG#dev-}" =~ ^[0-9a-f]{40}$ ]] \
+      || { [ "$ENV_NAME" = prod ] && [[ "$IMAGE_TAG" == dev-* ]]; }; then
+    echo "ERROR: crypto bootstrap requires an exact release SHA" >&2; exit 1
+  fi
+  if [ "$ENV_NAME" = prod ]; then
+    crypto_ref=qkgjlgzsharnilxnkytd
+  else
+    crypto_ref=wywzjslvxwttxkecbyis
+  fi
+  if ! docker run --rm --entrypoint python "$BACKEND_IMAGE" \
+      -c "from pathlib import Path;import sys;sys.exit(0 if Path('/app/scripts/preflight_chat_content_encryption.py').is_file() else 3)"; then
+    echo "ERROR: crypto bootstrap requires the new readonly/apply controller" >&2; exit 1
+  fi
+  bootstrap_mode=--check
+  bootstrap_verify=()
+  if [ "$CRYPTO_EXPAND" = 1 ]; then
+    bootstrap_mode=--apply
+    bootstrap_verify+=(--expect-applied)
+  fi
+  bootstrap_proof="$STATE_DIR/chat-content-bootstrap.json"
+  if ! docker run --rm --env-file "$NEXT_BACKEND_ENV_FILE" --entrypoint python "$BACKEND_IMAGE" \
+      scripts/preflight_chat_content_encryption.py --environment "$APP_ENV" \
+      --expected-project-ref "$crypto_ref" --expected-sha "${IMAGE_TAG#dev-}" \
+      --expected-sql-sha256 b6b80ea155570de38c9ef4645ec3fc3874e17e67d0cc23604b90eb87112c1f8b \
+      "$bootstrap_mode" > "$bootstrap_proof" 2>/dev/null; then
+    echo "ERROR: crypto bootstrap controller rejected candidate" >&2; exit 1
+  fi
+  chmod 600 "$bootstrap_proof"
+  if ! python3 "$CRYPTO_FLOOR" --bootstrap-proof "$bootstrap_proof" --environment "$APP_ENV" \
+      --expected-sha "${IMAGE_TAG#dev-}" --expected-project-ref "$crypto_ref" "${bootstrap_verify[@]}" >/dev/null 2>&1; then
+    echo "ERROR: crypto bootstrap proof invalid" >&2; exit 1
+  fi
+  echo "==> crypto bootstrap passed — live files, containers and timers unchanged"
+  exit 0
+fi
+
 # 새 컨테이너를 띄우기 전에, 이미지가 기대하는 스키마와 실제 DB가 맞는지 확인한다.
 # /health/ready는 SELECT 1만 하므로 테이블, 제약 조건, 인덱스가 빠진 것은 여기서 잡아야 한다.
 # 새 이미지는 자체 검사(db.schema_contract)를 쓰고, 이 모듈이 없는 예전 이미지로 롤백할 때는
 # scripts/verify_fortune_schema.py를 대신 실행한다. 둘 다 읽기 전용 트랜잭션이다.
-BACKEND_IMAGE="$ECR_REGISTRY/$IMAGE_REPO:$IMAGE_TAG"
 FORTUNE_PREFLIGHT="$SCRIPT_DIR/scripts/verify_fortune_schema.py"
 if [ ! -f "$FORTUNE_PREFLIGHT" ]; then
   echo "ERROR: 운세 DB preflight 스크립트 없음: $FORTUNE_PREFLIGHT" >&2
   exit 1
 fi
+# Fixed infra source reads only the policy row, so an old rollback image
+# cannot bypass the encryption floor via its legacy schema/consumer fallbacks.
+CRYPTO_FLOOR="$SCRIPT_DIR/scripts/verify_chat_content_floor.py"
+CRYPTO_SUPPORTED=0
+if [ ! -f "$CRYPTO_FLOOR" ]; then
+  echo "ERROR: chat content downgrade checker missing" >&2; exit 1
+fi
+if ! crypto_floor="$(docker run --rm -i --env-file "$NEXT_BACKEND_ENV_FILE" \
+    --entrypoint python "$BACKEND_IMAGE" - < "$CRYPTO_FLOOR" 2>/dev/null)"; then
+  echo "ERROR: chat content encryption downgrade floor rejected candidate" >&2; exit 1
+fi
+if ! crypto_flags="$(printf '%s' "$crypto_floor" | python3 -c 'import json,sys;v=json.load(sys.stdin);assert set(v)=={"supported","started","state_present"};assert all(type(x)is bool for x in v.values());print(int(v["supported"]),int(v["started"]))' 2>/dev/null)"; then
+  echo "ERROR: chat content encryption floor result invalid" >&2; exit 1
+fi
+read -r CRYPTO_SUPPORTED CRYPTO_STARTED <<< "$crypto_flags"
+
 echo "==> DB schema preflight"
 if docker run --rm --entrypoint python "$BACKEND_IMAGE" \
     -c "import importlib.util,sys; sys.exit(0 if importlib.util.find_spec('db') and importlib.util.find_spec('db.schema_contract') else 3)"; then
-  docker run --rm --env-file "$NEXT_BACKEND_ENV_FILE" \
-    --entrypoint python "$BACKEND_IMAGE" -m db.schema_contract
+  if ! docker run --rm --env-file "$NEXT_BACKEND_ENV_FILE" \
+      --entrypoint python "$BACKEND_IMAGE" -m db.schema_contract; then
+    # Exact known main0f baseline only. Never retry a capable image's schema
+    # failure or permit this legacy reader after encrypted writes have started.
+    if [ "$CRYPTO_SUPPORTED" = 0 ] && [ "$CRYPTO_STARTED" = 0 ] \
+        && [ -f "$SCRIPT_DIR/scripts/verify_chat_content_schema.py" ]; then
+      docker run --rm -i --env-file "$NEXT_BACKEND_ENV_FILE" \
+        --entrypoint python "$BACKEND_IMAGE" - < "$SCRIPT_DIR/scripts/verify_chat_content_schema.py"
+    else
+      echo "ERROR: DB schema contract rejected candidate" >&2; exit 1
+    fi
+  fi
 else
   schema_probe_rc=$?
   if [ "$schema_probe_rc" -ne 3 ]; then
@@ -280,6 +365,43 @@ else
     --entrypoint python "$BACKEND_IMAGE" - < "$FORTUNE_PREFLIGHT"
 fi
 
+crypto_assert_no_orphan_consumers() {
+  local names name
+  if ! names="$(docker ps --filter label=com.docker.compose.service=consumer --format '{{.Names}}')"; then
+    echo "ERROR: consumer inventory unavailable" >&2; return 1
+  fi
+  while IFS= read -r name; do
+    if [ -n "$name" ] && [ "$name" != moly-consumer ]; then
+      echo "ERROR: unverified extra consumer is running" >&2; return 1
+    fi
+  done <<< "$names"
+}
+if [ "$CRYPTO_SUPPORTED" = 1 ]; then
+  crypto_assert_no_orphan_consumers || exit 1
+  if [[ ! "${IMAGE_TAG#dev-}" =~ ^[0-9a-f]{40}$ ]] \
+      || { [ "$ENV_NAME" = prod ] && [[ "$IMAGE_TAG" == dev-* ]]; }; then
+    echo "ERROR: compatible crypto image must use an exact release SHA" >&2; exit 1
+  fi
+  if ! docker run --rm --entrypoint python "$BACKEND_IMAGE" \
+      -c "import importlib.util,sys; sys.exit(0 if importlib.util.find_spec('worker.consumer') else 3)"; then
+    echo "ERROR: compatible crypto image requires the consumer" >&2; exit 1
+  fi
+  # The backend checker is read-only and self-tests local crypto. Its stdout
+  # contains key fingerprints, so keep it private and never feed it to SSM logs.
+  crypto_proof="$STATE_DIR/chat-content-proof.next.json"
+  if ! docker run --rm --env-file "$NEXT_BACKEND_ENV_FILE" --entrypoint python "$BACKEND_IMAGE" \
+      scripts/check_chat_content_crypto.py --environment "$APP_ENV" \
+      --expected-sha "${IMAGE_TAG#dev-}" > "$crypto_proof" 2>/dev/null; then
+    echo "ERROR: chat content crypto key/capability preflight failed" >&2; exit 1
+  fi
+  chmod 600 "$crypto_proof"
+  if ! python3 "$CRYPTO_FLOOR" --proof "$crypto_proof" --environment "$APP_ENV" \
+      --expected-sha "${IMAGE_TAG#dev-}" >/dev/null 2>&1; then
+    echo "ERROR: chat content crypto candidate proof invalid" >&2; exit 1
+  fi
+  echo "==> chat content crypto candidate preflight OK"
+fi
+
 # 사전점검 모드는 여기서 끝낸다. prod workflow는 서버를 ALB에서 빼기 전에 모든 서버에서 이 단계를
 # 먼저 실행하므로, 검증이 실패해도 서비스에는 영향이 없다.
 # 임시 파일만 지우고 live 파일, 컨테이너, 워커 타이머는 그대로 둔다.
@@ -289,7 +411,57 @@ if [ "$PREFLIGHT_ONLY" = "1" ]; then
   exit 0
 fi
 
-# 여기서부터 live 파일을 바꾼다. 이후 단계에서 실패해도 자동으로 되돌리지 않으므로, 이전 SHA로 다시 배포해 복구한다.
+# Pause scheduling before replacing live env, but let the current tick finish
+# in parallel with API/consumer rolling. Do not stop/kill the service/container.
+CRYPTO_TIMER_PAUSED=0
+CRYPTO_TIMER_WAS_ACTIVE=0
+CRYPTO_DRAIN_STARTED=$SECONDS
+CRYPTO_LIVE_PROMOTED=0
+crypto_verify_worker_launch() {
+  # Validate the effective service the timer actually launches, then execute
+  # only its local read-only checker. This never runs a worker tick/model call.
+  if ! docker compose --env-file "$COMPOSE_ENV_FILE" -f "$COMPOSE_FILE" --profile worker config --format json 2>/dev/null \
+      | python3 -c 'import json,sys;w=json.load(sys.stdin)["services"]["worker"];assert w["image"]==sys.argv[1];assert w["command"]==["python","-m","worker"]' "$BACKEND_IMAGE" 2>/dev/null; then
+    echo "ERROR: chat content worker launch configuration mismatch" >&2; return 1
+  fi
+  worker_proof="$STATE_DIR/chat-content-worker-launch.json"
+  if ! docker compose --env-file "$COMPOSE_ENV_FILE" -f "$COMPOSE_FILE" run --rm --no-deps \
+      --entrypoint python worker scripts/check_chat_content_crypto.py \
+      --environment "$APP_ENV" --expected-sha "${IMAGE_TAG#dev-}" > "$worker_proof" 2>/dev/null; then
+    echo "ERROR: chat content worker launch capability check failed" >&2; return 1
+  fi
+  chmod 600 "$worker_proof"
+  if ! python3 "$CRYPTO_FLOOR" --proof "$worker_proof" --reference "$crypto_proof" \
+      --environment "$APP_ENV" --expected-sha "${IMAGE_TAG#dev-}" >/dev/null 2>&1; then
+    echo "ERROR: chat content worker launch key/policy mismatch" >&2; return 1
+  fi
+}
+crypto_restore_timer() {
+  local result=$?
+  if [ "$CRYPTO_TIMER_PAUSED" = 1 ] && [ "$CRYPTO_TIMER_WAS_ACTIVE" = 1 ]; then
+    if [ "$CRYPTO_LIVE_PROMOTED" = 1 ] && ! crypto_verify_worker_launch; then
+      echo "ERROR: worker timer remains paused; redeploy a verified compatible image" >&2
+      return 1
+    fi
+    if ! systemctl start moly-worker.timer >/dev/null 2>&1; then
+      echo "ERROR: chat content drain timer restore failed" >&2
+      result=1
+    fi
+  fi
+  return "$result"
+}
+if [ "$CRYPTO_SUPPORTED" = 1 ]; then
+  timer_before="$(systemctl is-active moly-worker.timer 2>/dev/null || true)"
+  CRYPTO_TIMER_PAUSED=1
+  trap crypto_restore_timer EXIT
+  case "$timer_before" in
+    active) CRYPTO_TIMER_WAS_ACTIVE=1; systemctl stop moly-worker.timer >/dev/null ;;
+    inactive|failed|unknown) ;;
+    *) echo "ERROR: chat content timer state unavailable" >&2; exit 1 ;;
+  esac
+fi
+
+# 여기서부터 live 파일을 바꾼다. 이후 단계에서 실패해도 자동으로 되돌리지 않으므로, 호환성이 검증된 SHA로 다시 배포해 복구한다. 암호화 시작 후 구 비호환 이미지로 돌아가지 않는다.
 # FCM 파일은 기존 파일에 덮어써서 inode를 유지한다. bind mount가 같은 inode를 보므로
 # 실행 중인 consumer도 새 내용을 읽는다.
 cp "$NEXT_FCM_FILE" "$FCM_FILE"
@@ -300,6 +472,7 @@ rm -f "$NEXT_FCM_FILE"
 # 반쯤 쓰인 파일이 보이면 안 된다.
 mv "$NEXT_BACKEND_ENV_FILE" "$SCRIPT_DIR/backend.env"
 mv "$NEXT_COMPOSE_ENV_FILE" "$COMPOSE_ENV_FILE"
+CRYPTO_LIVE_PROMOTED=1
 
 # ---------------------------------------------------------------------------
 # 6. 컨테이너 기동
@@ -329,6 +502,9 @@ if docker run --rm --entrypoint python "$CONSUMER_IMAGE" \
   docker compose --env-file "$COMPOSE_ENV_FILE" -f "$COMPOSE_FILE" \
     --profile consumer up -d consumer
   CONSUMER_STARTED=1
+  if [ "$CRYPTO_SUPPORTED" = 1 ] && [ "$new_backend_hash" != "$old_backend_hash" ]; then
+    RECREATE+=("consumer")
+  fi
 else
   consumer_rc=$?
   if [ "$consumer_rc" -eq 3 ]; then
@@ -392,6 +568,26 @@ if [ "$CONSUMER_STARTED" -eq 1 ]; then
   echo "  - async job consumer running"
 fi
 
+if [ "$CRYPTO_SUPPORTED" = 1 ]; then
+  crypto_assert_no_orphan_consumers || exit 1
+  for crypto_role in moly-backend moly-consumer; do
+    if [ "$(docker inspect --format '{{.Config.Image}}' "$crypto_role")" != "$BACKEND_IMAGE" ]; then
+      echo "ERROR: chat content runtime image mismatch" >&2; exit 1
+    fi
+    runtime_proof="$STATE_DIR/chat-content-${crypto_role}.json"
+    if ! docker exec "$crypto_role" python scripts/check_chat_content_crypto.py \
+        --environment "$APP_ENV" --expected-sha "${IMAGE_TAG#dev-}" > "$runtime_proof" 2>/dev/null; then
+      echo "ERROR: chat content runtime capability check failed" >&2; exit 1
+    fi
+    chmod 600 "$runtime_proof"
+    if ! python3 "$CRYPTO_FLOOR" --proof "$runtime_proof" --reference "$crypto_proof" \
+        --environment "$APP_ENV" --expected-sha "${IMAGE_TAG#dev-}" >/dev/null 2>&1; then
+      echo "ERROR: chat content runtime key/policy mismatch" >&2; exit 1
+    fi
+  done
+  echo "==> chat content API/consumer capability verified"
+fi
+
 # ALB가 쓰는 경로(nginx :8080 → :8000)도 확인한다. nginx 설정은 이 스크립트가 관리하지 않으므로
 # 설정이 빠졌거나 reload에 실패한 것을 ALB에 다시 등록하기 전에 여기서 잡는다.
 if ! curl -sf --max-time 5 http://127.0.0.1:8080/health >/dev/null 2>&1; then
@@ -399,6 +595,29 @@ if ! curl -sf --max-time 5 http://127.0.0.1:8080/health >/dev/null 2>&1; then
   exit 1
 fi
 echo "  - nginx :8080 경로 OK"
+
+if [ "$CRYPTO_SUPPORTED" = 1 ]; then
+  while true; do
+    # A timed-out systemd compose client can leave an orphan worker. Both
+    # actual containers and the still-starting service must be quiescent.
+    if ! old_ticks="$(docker ps --filter label=com.docker.compose.service=worker --format '{{.ID}}' 2>/dev/null)"; then
+      echo "ERROR: chat content old worker inventory unavailable" >&2; exit 1
+    fi
+    tick_service="$(systemctl is-active moly-worker.service 2>/dev/null || true)"
+    case "$tick_service" in
+      inactive|failed|unknown) service_idle=1 ;;
+      active|activating|deactivating) service_idle=0 ;;
+      *) echo "ERROR: chat content worker service state unknown" >&2; exit 1 ;;
+    esac
+    if [ -z "$old_ticks" ] && [ "$service_idle" = 1 ]; then break; fi
+    if [ "$((SECONDS - CRYPTO_DRAIN_STARTED))" -ge 900 ]; then
+      echo "ERROR: chat content old worker graceful drain timed out" >&2; exit 1
+    fi
+    sleep 2
+  done
+  echo "==> chat content old worker drain complete"
+  crypto_verify_worker_launch || exit 1
+fi
 
 # ---------------------------------------------------------------------------
 # 7. 배치 워커 systemd 유닛 (15분마다 1회 실행)
@@ -434,6 +653,13 @@ if [ -f "$WORKER_HOST_MARKER" ]; then
 else
   echo "==> 워커 호스트 아님 — 타이머 비활성 보장"
   systemctl disable --now moly-worker.timer >/dev/null 2>&1 || true
+fi
+
+# Timer is now restored according to the existing legitimate worker-host
+# policy. The caller still performs fleet checks before any DB activation.
+if [ "$CRYPTO_SUPPORTED" = 1 ]; then
+  CRYPTO_TIMER_PAUSED=0
+  trap - EXIT
 fi
 
 # ---------------------------------------------------------------------------
