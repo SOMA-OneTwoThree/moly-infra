@@ -68,8 +68,11 @@ elif name=='docker':
         elif 'config' in args:
             event('worker_launch_config')
             env=dict(line.split('=',1) for line in (root/'.env').read_text().splitlines())
-            print(json.dumps({'services':{'worker':{'image':'676972757138.dkr.ecr.ap-northeast-2.amazonaws.com/'+env['IMAGE_REPO']+':'+case.get('worker_image_tag',env['IMAGE_TAG']),
-              'command':['python','-m','worker']}}}))
+            worker={'image':'676972757138.dkr.ecr.ap-northeast-2.amazonaws.com/'+env['IMAGE_REPO']+':'+case.get('worker_image_tag',env['IMAGE_TAG']),
+              'command':['python','-m','worker']}
+            # Real Compose omits services whose profile is not enabled.
+            enabled='--profile' in args and args[args.index('--profile')+1] in {'worker','*'}
+            print(json.dumps({'services':{'worker':worker} if enabled else {}}))
         elif 'run' in args and 'scripts/check_chat_content_crypto.py' in args:
             event('crypto_worker_launch');fail('crypto_worker_fail')
             print(json.dumps({'capability':'chat-content-aead-v1','environment':('development' if case.get('environment')=='dev' else 'production'),
@@ -222,6 +225,23 @@ class DeployTests(unittest.TestCase):
         self.assertIn('--no-deps',launch['args'])
         self.assertIn('scripts/check_chat_content_crypto.py',launch['args'])
         self.assertNotIn('-m',launch['args'])
+
+    def test_actual_compose_profile_semantics_require_worker_profile_for_launch_proof(self):
+        run,events,_=self.run_deploy(self.crypto_case())
+        self.assertEqual(run.returncode,0,run.stderr)
+        config=next(event for event in events if event['kind']=='worker_launch_config')
+        self.assertEqual(config['args'][config['args'].index('--profile')+1],'worker')
+        # Execute the old invocation against the realistic fake: no profile
+        # means no worker in JSON, preserving the actual failure as regression.
+        with tempfile.TemporaryDirectory() as directory:
+            old=Path(directory)/'deploy.sh'
+            source=(ROOT/'deploy.sh').read_text()
+            self.assertEqual(source.count('--profile worker config --format json'),1)
+            old.write_text(source.replace('--profile worker config --format json','config --format json'))
+            result,events,_=self.run_deploy(self.crypto_case(),source=old)
+            self.assertNotEqual(result.returncode,0)
+            self.assertIn('worker launch configuration mismatch',result.stderr)
+            self.assertNotIn('배포 완료',result.stdout)
 
     def test_started_old_reader_is_rejected_before_any_schema_fallback_or_live_change(self):
         for fallback in ({}, {'schema_probe':3}):

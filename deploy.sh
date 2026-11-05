@@ -420,7 +420,7 @@ CRYPTO_LIVE_PROMOTED=0
 crypto_verify_worker_launch() {
   # Validate the effective service the timer actually launches, then execute
   # only its local read-only checker. This never runs a worker tick/model call.
-  if ! docker compose --env-file "$COMPOSE_ENV_FILE" -f "$COMPOSE_FILE" config --format json 2>/dev/null \
+  if ! docker compose --env-file "$COMPOSE_ENV_FILE" -f "$COMPOSE_FILE" --profile worker config --format json 2>/dev/null \
       | python3 -c 'import json,sys;w=json.load(sys.stdin)["services"]["worker"];assert w["image"]==sys.argv[1];assert w["command"]==["python","-m","worker"]' "$BACKEND_IMAGE" 2>/dev/null; then
     echo "ERROR: chat content worker launch configuration mismatch" >&2; return 1
   fi
