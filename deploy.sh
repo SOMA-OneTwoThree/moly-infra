@@ -59,6 +59,15 @@ case "$PREFLIGHT_ONLY" in
   0|1) ;;
   *) printf "ERROR: DEPLOY_PREFLIGHT_ONLY 값이 0|1 이 아닙니다: %q\n" "$PREFLIGHT_ONLY" >&2; exit 1 ;;
 esac
+CRYPTO_BOOTSTRAP="${DEPLOY_CRYPTO_BOOTSTRAP:-0}"
+CRYPTO_EXPAND="${DEPLOY_CRYPTO_EXPAND:-0}"
+case "$CRYPTO_BOOTSTRAP:$CRYPTO_EXPAND" in
+  0:0|1:0|1:1) ;;
+  *) echo "ERROR: crypto bootstrap flags must be explicit 0|1 with expand requiring bootstrap" >&2; exit 1 ;;
+esac
+if [ "$CRYPTO_BOOTSTRAP" = 1 ] && [ "$PREFLIGHT_ONLY" != 1 ]; then
+  echo "ERROR: crypto bootstrap requires preflight-only mode" >&2; exit 1
+fi
 if [ "$PREFLIGHT_ONLY" = "1" ]; then
   echo "==> 사전점검 전용 모드 — 이미지 pull·DB 계약 검증까지만 하고 live 파일·컨테이너는 바꾸지 않는다"
 fi
@@ -266,32 +275,54 @@ if [ "$new_backend_hash" != "$old_backend_hash" ]; then RECREATE+=("backend"); f
 echo "==> 이미지 pull"
 docker compose --env-file "$NEXT_COMPOSE_ENV_FILE" -f "$COMPOSE_FILE" pull
 
+BACKEND_IMAGE="$ECR_REGISTRY/$IMAGE_REPO:$IMAGE_TAG"
+if [ "$CRYPTO_BOOTSTRAP" = 1 ]; then
+  trap 'rm -f "$NEXT_FCM_FILE" "$NEXT_BACKEND_ENV_FILE" "$NEXT_COMPOSE_ENV_FILE"' EXIT
+  if [[ ! "${IMAGE_TAG#dev-}" =~ ^[0-9a-f]{40}$ ]] \
+      || { [ "$ENV_NAME" = prod ] && [[ "$IMAGE_TAG" == dev-* ]]; }; then
+    echo "ERROR: crypto bootstrap requires an exact release SHA" >&2; exit 1
+  fi
+  if [ "$ENV_NAME" = prod ]; then
+    crypto_ref=qkgjlgzsharnilxnkytd
+  else
+    crypto_ref=wywzjslvxwttxkecbyis
+  fi
+  if ! docker run --rm --entrypoint python "$BACKEND_IMAGE" \
+      -c "from pathlib import Path;import sys;sys.exit(0 if Path('/app/scripts/preflight_chat_content_encryption.py').is_file() else 3)"; then
+    echo "ERROR: crypto bootstrap requires the new readonly/apply controller" >&2; exit 1
+  fi
+  bootstrap_mode=--check
+  bootstrap_verify=()
+  if [ "$CRYPTO_EXPAND" = 1 ]; then
+    bootstrap_mode=--apply
+    bootstrap_verify+=(--expect-applied)
+  fi
+  bootstrap_proof="$STATE_DIR/chat-content-bootstrap.json"
+  if ! docker run --rm --env-file "$NEXT_BACKEND_ENV_FILE" --entrypoint python "$BACKEND_IMAGE" \
+      scripts/preflight_chat_content_encryption.py --environment "$APP_ENV" \
+      --expected-project-ref "$crypto_ref" --expected-sha "${IMAGE_TAG#dev-}" \
+      --expected-sql-sha256 b6b80ea155570de38c9ef4645ec3fc3874e17e67d0cc23604b90eb87112c1f8b \
+      "$bootstrap_mode" > "$bootstrap_proof" 2>/dev/null; then
+    echo "ERROR: crypto bootstrap controller rejected candidate" >&2; exit 1
+  fi
+  chmod 600 "$bootstrap_proof"
+  if ! python3 "$CRYPTO_FLOOR" --bootstrap-proof "$bootstrap_proof" --environment "$APP_ENV" \
+      --expected-sha "${IMAGE_TAG#dev-}" --expected-project-ref "$crypto_ref" "${bootstrap_verify[@]}" >/dev/null 2>&1; then
+    echo "ERROR: crypto bootstrap proof invalid" >&2; exit 1
+  fi
+  echo "==> crypto bootstrap passed — live files, containers and timers unchanged"
+  exit 0
+fi
+
 # 새 컨테이너를 띄우기 전에, 이미지가 기대하는 스키마와 실제 DB가 맞는지 확인한다.
 # /health/ready는 SELECT 1만 하므로 테이블, 제약 조건, 인덱스가 빠진 것은 여기서 잡아야 한다.
 # 새 이미지는 자체 검사(db.schema_contract)를 쓰고, 이 모듈이 없는 예전 이미지로 롤백할 때는
 # scripts/verify_fortune_schema.py를 대신 실행한다. 둘 다 읽기 전용 트랜잭션이다.
-BACKEND_IMAGE="$ECR_REGISTRY/$IMAGE_REPO:$IMAGE_TAG"
 FORTUNE_PREFLIGHT="$SCRIPT_DIR/scripts/verify_fortune_schema.py"
 if [ ! -f "$FORTUNE_PREFLIGHT" ]; then
   echo "ERROR: 운세 DB preflight 스크립트 없음: $FORTUNE_PREFLIGHT" >&2
   exit 1
 fi
-echo "==> DB schema preflight"
-if docker run --rm --entrypoint python "$BACKEND_IMAGE" \
-    -c "import importlib.util,sys; sys.exit(0 if importlib.util.find_spec('db') and importlib.util.find_spec('db.schema_contract') else 3)"; then
-  docker run --rm --env-file "$NEXT_BACKEND_ENV_FILE" \
-    --entrypoint python "$BACKEND_IMAGE" -m db.schema_contract
-else
-  schema_probe_rc=$?
-  if [ "$schema_probe_rc" -ne 3 ]; then
-    echo "ERROR: DB schema verifier probe failed (exit=$schema_probe_rc)" >&2
-    exit 1
-  fi
-  # 예전 이미지: 당시 운세 기능의 테이블 구조와 권한만 확인한다.
-  docker run --rm -i --env-file "$NEXT_BACKEND_ENV_FILE" \
-    --entrypoint python "$BACKEND_IMAGE" - < "$FORTUNE_PREFLIGHT"
-fi
-
 # Fixed infra source reads only the policy row, so an old rollback image
 # cannot bypass the encryption floor via its legacy schema/consumer fallbacks.
 CRYPTO_FLOOR="$SCRIPT_DIR/scripts/verify_chat_content_floor.py"
@@ -303,10 +334,58 @@ if ! crypto_floor="$(docker run --rm -i --env-file "$NEXT_BACKEND_ENV_FILE" \
     --entrypoint python "$BACKEND_IMAGE" - < "$CRYPTO_FLOOR" 2>/dev/null)"; then
   echo "ERROR: chat content encryption downgrade floor rejected candidate" >&2; exit 1
 fi
-if ! CRYPTO_SUPPORTED="$(printf '%s' "$crypto_floor" | python3 -c 'import json,sys;v=json.load(sys.stdin);assert set(v)=={"supported","started","state_present"};assert all(type(x)is bool for x in v.values());print(int(v["supported"]))' 2>/dev/null)"; then
+if ! crypto_flags="$(printf '%s' "$crypto_floor" | python3 -c 'import json,sys;v=json.load(sys.stdin);assert set(v)=={"supported","started","state_present"};assert all(type(x)is bool for x in v.values());print(int(v["supported"]),int(v["started"]))' 2>/dev/null)"; then
   echo "ERROR: chat content encryption floor result invalid" >&2; exit 1
 fi
+read -r CRYPTO_SUPPORTED CRYPTO_STARTED <<< "$crypto_flags"
+
+echo "==> DB schema preflight"
+if docker run --rm --entrypoint python "$BACKEND_IMAGE" \
+    -c "import importlib.util,sys; sys.exit(0 if importlib.util.find_spec('db') and importlib.util.find_spec('db.schema_contract') else 3)"; then
+  if ! docker run --rm --env-file "$NEXT_BACKEND_ENV_FILE" \
+      --entrypoint python "$BACKEND_IMAGE" -m db.schema_contract; then
+    # Exact known main0f baseline only. Never retry a capable image's schema
+    # failure or permit this legacy reader after encrypted writes have started.
+    if [ "$CRYPTO_SUPPORTED" = 0 ] && [ "$CRYPTO_STARTED" = 0 ] \
+        && [ -f "$SCRIPT_DIR/scripts/verify_chat_content_schema.py" ]; then
+      docker run --rm -i --env-file "$NEXT_BACKEND_ENV_FILE" \
+        --entrypoint python "$BACKEND_IMAGE" - < "$SCRIPT_DIR/scripts/verify_chat_content_schema.py"
+    else
+      echo "ERROR: DB schema contract rejected candidate" >&2; exit 1
+    fi
+  fi
+else
+  schema_probe_rc=$?
+  if [ "$schema_probe_rc" -ne 3 ]; then
+    echo "ERROR: DB schema verifier probe failed (exit=$schema_probe_rc)" >&2
+    exit 1
+  fi
+  # 예전 이미지: 당시 운세 기능의 테이블 구조와 권한만 확인한다.
+  docker run --rm -i --env-file "$NEXT_BACKEND_ENV_FILE" \
+    --entrypoint python "$BACKEND_IMAGE" - < "$FORTUNE_PREFLIGHT"
+fi
+
+crypto_assert_no_orphan_consumers() {
+  local names name
+  if ! names="$(docker ps --filter label=com.docker.compose.service=consumer --format '{{.Names}}')"; then
+    echo "ERROR: consumer inventory unavailable" >&2; return 1
+  fi
+  while IFS= read -r name; do
+    if [ -n "$name" ] && [ "$name" != moly-consumer ]; then
+      echo "ERROR: unverified extra consumer is running" >&2; return 1
+    fi
+  done <<< "$names"
+}
 if [ "$CRYPTO_SUPPORTED" = 1 ]; then
+  crypto_assert_no_orphan_consumers || exit 1
+  if [[ ! "${IMAGE_TAG#dev-}" =~ ^[0-9a-f]{40}$ ]] \
+      || { [ "$ENV_NAME" = prod ] && [[ "$IMAGE_TAG" == dev-* ]]; }; then
+    echo "ERROR: compatible crypto image must use an exact release SHA" >&2; exit 1
+  fi
+  if ! docker run --rm --entrypoint python "$BACKEND_IMAGE" \
+      -c "import importlib.util,sys; sys.exit(0 if importlib.util.find_spec('worker.consumer') else 3)"; then
+    echo "ERROR: compatible crypto image requires the consumer" >&2; exit 1
+  fi
   # The backend checker is read-only and self-tests local crypto. Its stdout
   # contains key fingerprints, so keep it private and never feed it to SSM logs.
   crypto_proof="$STATE_DIR/chat-content-proof.next.json"
@@ -337,9 +416,33 @@ fi
 CRYPTO_TIMER_PAUSED=0
 CRYPTO_TIMER_WAS_ACTIVE=0
 CRYPTO_DRAIN_STARTED=$SECONDS
+CRYPTO_LIVE_PROMOTED=0
+crypto_verify_worker_launch() {
+  # Validate the effective service the timer actually launches, then execute
+  # only its local read-only checker. This never runs a worker tick/model call.
+  if ! docker compose --env-file "$COMPOSE_ENV_FILE" -f "$COMPOSE_FILE" config --format json 2>/dev/null \
+      | python3 -c 'import json,sys;w=json.load(sys.stdin)["services"]["worker"];assert w["image"]==sys.argv[1];assert w["command"]==["python","-m","worker"]' "$BACKEND_IMAGE" 2>/dev/null; then
+    echo "ERROR: chat content worker launch configuration mismatch" >&2; return 1
+  fi
+  worker_proof="$STATE_DIR/chat-content-worker-launch.json"
+  if ! docker compose --env-file "$COMPOSE_ENV_FILE" -f "$COMPOSE_FILE" run --rm --no-deps \
+      --entrypoint python worker scripts/check_chat_content_crypto.py \
+      --environment "$APP_ENV" --expected-sha "${IMAGE_TAG#dev-}" > "$worker_proof" 2>/dev/null; then
+    echo "ERROR: chat content worker launch capability check failed" >&2; return 1
+  fi
+  chmod 600 "$worker_proof"
+  if ! python3 "$CRYPTO_FLOOR" --proof "$worker_proof" --reference "$crypto_proof" \
+      --environment "$APP_ENV" --expected-sha "${IMAGE_TAG#dev-}" >/dev/null 2>&1; then
+    echo "ERROR: chat content worker launch key/policy mismatch" >&2; return 1
+  fi
+}
 crypto_restore_timer() {
   local result=$?
   if [ "$CRYPTO_TIMER_PAUSED" = 1 ] && [ "$CRYPTO_TIMER_WAS_ACTIVE" = 1 ]; then
+    if [ "$CRYPTO_LIVE_PROMOTED" = 1 ] && ! crypto_verify_worker_launch; then
+      echo "ERROR: worker timer remains paused; redeploy a verified compatible image" >&2
+      return 1
+    fi
     if ! systemctl start moly-worker.timer >/dev/null 2>&1; then
       echo "ERROR: chat content drain timer restore failed" >&2
       result=1
@@ -358,7 +461,7 @@ if [ "$CRYPTO_SUPPORTED" = 1 ]; then
   esac
 fi
 
-# 여기서부터 live 파일을 바꾼다. 이후 단계에서 실패해도 자동으로 되돌리지 않으므로, 이전 SHA로 다시 배포해 복구한다.
+# 여기서부터 live 파일을 바꾼다. 이후 단계에서 실패해도 자동으로 되돌리지 않으므로, 호환성이 검증된 SHA로 다시 배포해 복구한다. 암호화 시작 후 구 비호환 이미지로 돌아가지 않는다.
 # FCM 파일은 기존 파일에 덮어써서 inode를 유지한다. bind mount가 같은 inode를 보므로
 # 실행 중인 consumer도 새 내용을 읽는다.
 cp "$NEXT_FCM_FILE" "$FCM_FILE"
@@ -369,6 +472,7 @@ rm -f "$NEXT_FCM_FILE"
 # 반쯤 쓰인 파일이 보이면 안 된다.
 mv "$NEXT_BACKEND_ENV_FILE" "$SCRIPT_DIR/backend.env"
 mv "$NEXT_COMPOSE_ENV_FILE" "$COMPOSE_ENV_FILE"
+CRYPTO_LIVE_PROMOTED=1
 
 # ---------------------------------------------------------------------------
 # 6. 컨테이너 기동
@@ -465,7 +569,11 @@ if [ "$CONSUMER_STARTED" -eq 1 ]; then
 fi
 
 if [ "$CRYPTO_SUPPORTED" = 1 ]; then
+  crypto_assert_no_orphan_consumers || exit 1
   for crypto_role in moly-backend moly-consumer; do
+    if [ "$(docker inspect --format '{{.Config.Image}}' "$crypto_role")" != "$BACKEND_IMAGE" ]; then
+      echo "ERROR: chat content runtime image mismatch" >&2; exit 1
+    fi
     runtime_proof="$STATE_DIR/chat-content-${crypto_role}.json"
     if ! docker exec "$crypto_role" python scripts/check_chat_content_crypto.py \
         --environment "$APP_ENV" --expected-sha "${IMAGE_TAG#dev-}" > "$runtime_proof" 2>/dev/null; then
@@ -508,6 +616,7 @@ if [ "$CRYPTO_SUPPORTED" = 1 ]; then
     sleep 2
   done
   echo "==> chat content old worker drain complete"
+  crypto_verify_worker_launch || exit 1
 fi
 
 # ---------------------------------------------------------------------------

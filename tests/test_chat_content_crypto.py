@@ -165,3 +165,38 @@ exit 0
 
 if __name__=='__main__':
     unittest.main()
+
+
+class BootstrapProofTests(unittest.TestCase):
+    def proof(self):
+        return {'format':'chat-content-schema-v1','environment':'production',
+                'project_ref':'qkgjlgzsharnilxnkytd','version':'a'*40,
+                'key_fingerprints':{'1':'b'*64},'self_test':'ok',
+                'sql_sha256':module.BOOTSTRAP_SQL_SHA256,'schema_status':'needs_expansion',
+                'schema_fingerprint':'c'*64,'applied':False,
+                'config_snapshot':{key:{'exists':False,'value':None} for key in module.CONFIG_KEYS}}
+
+    def validate(self,proof,apply=False):
+        return module.validate_bootstrap(proof,environment='production',version='a'*40,
+            project_ref='qkgjlgzsharnilxnkytd',apply=apply)
+
+    def test_before_expansion_key_proof_is_valid_but_apply_requires_expanded_schema(self):
+        value=self.proof()
+        self.validate(value)
+        with self.assertRaises(ValueError): self.validate(value,apply=True)
+        self.validate({**value,'schema_status':'expanded','applied':True},apply=True)
+        with self.assertRaises(ValueError): self.validate({**value,'applied':True})
+
+    def test_receipt_rejects_wrong_target_version_sql_keys_or_partial_snapshot(self):
+        for key,wrong in [('project_ref','wrong'),('version','b'*40),('sql_sha256','d'*64),
+                          ('self_test','failed'),('key_fingerprints',{}),('config_snapshot',{})]:
+            with self.subTest(key=key),self.assertRaises(ValueError):
+                self.validate({**self.proof(),key:wrong})
+
+    def test_existing_marker_requires_proof_for_all_required_keys(self):
+        value=self.proof()
+        value['config_snapshot'][module.KEY]={'exists':True,'value':{
+            'started':False,'format_version':1,'active_key_id':2,'required_key_ids':[1,2]}}
+        with self.assertRaises(ValueError): self.validate(value)
+        value['key_fingerprints']['2']='e'*64
+        self.validate(value)

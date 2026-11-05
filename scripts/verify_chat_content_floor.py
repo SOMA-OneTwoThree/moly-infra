@@ -89,6 +89,43 @@ def validate_proof(value, *, environment, version):
         raise ValueError('invalid_proof')
 
 
+BOOTSTRAP_SQL_SHA256 = 'b6b80ea155570de38c9ef4645ec3fc3874e17e67d0cc23604b90eb87112c1f8b'
+PROJECTS = {'production':'qkgjlgzsharnilxnkytd','development':'wywzjslvxwttxkecbyis'}
+CONFIG_KEYS = {'crisis_guard_enabled','crisis_guard_policy_version','crisis_guard_timeout_s',
+               'crisis_guard_history_messages',KEY}
+
+
+def validate_bootstrap(value, *, environment, version, project_ref, apply=False):
+    expected={'format','environment','project_ref','version','key_fingerprints','self_test','sql_sha256',
+              'schema_status','schema_fingerprint','applied','config_snapshot'}
+    if (not isinstance(value,dict) or set(value)!=expected or value['format']!='chat-content-schema-v1'
+            or PROJECTS.get(environment)!=project_ref or value['environment']!=environment
+            or value['project_ref']!=project_ref or value['version']!=version
+            or not isinstance(version,str) or not re.fullmatch(r'[0-9a-f]{40}',version)
+            or value['sql_sha256']!=BOOTSTRAP_SQL_SHA256 or value['self_test']!='ok'
+            or value['schema_status'] not in {'needs_expansion','expanded'}
+            or not isinstance(value['schema_fingerprint'],str)
+            or not re.fullmatch(r'[0-9a-f]{64}',value['schema_fingerprint'])
+            or type(value['applied']) is not bool
+            or (not apply and value['applied']) or (apply and value['schema_status']!='expanded')
+            or not isinstance(value['config_snapshot'],dict) or set(value['config_snapshot'])!=CONFIG_KEYS):
+        raise ValueError('invalid_bootstrap_proof')
+    for record in value['config_snapshot'].values():
+        if (not isinstance(record,dict) or set(record)!={'exists','value'}
+                or type(record['exists']) is not bool or (not record['exists'] and record['value'] is not None)):
+            raise ValueError('invalid_bootstrap_snapshot')
+    marker=value['config_snapshot'][KEY]
+    mode=marker['value'] if marker['exists'] else None
+    floor(mode,supported=True)
+    if isinstance(mode,str): mode=json.loads(mode)
+    required=[str(key) for key in mode['required_key_ids']] if mode is not None else ['1']
+    fingerprints=value['key_fingerprints']
+    if (not isinstance(fingerprints,dict) or set(fingerprints)!=set(required)
+            or not all(isinstance(fingerprint,str) and re.fullmatch(r'[0-9a-f]{64}',fingerprint)
+                       for fingerprint in fingerprints.values())):
+        raise ValueError('invalid_bootstrap_key_proof')
+
+
 async def check():
     import asyncpg
     dsn = re.sub(r'^postgresql\+asyncpg://', 'postgresql://',
@@ -110,6 +147,9 @@ def main():
     try:
         parser=argparse.ArgumentParser()
         parser.add_argument('--normalize-keyring', action='store_true')
+        parser.add_argument('--bootstrap-proof')
+        parser.add_argument('--expected-project-ref')
+        parser.add_argument('--expect-applied', action='store_true')
         parser.add_argument('--proof')
         parser.add_argument('--reference')
         parser.add_argument('--environment')
@@ -117,6 +157,13 @@ def main():
         args=parser.parse_args()
         if args.normalize_keyring:
             print(normalize_keyring(sys.stdin.read(65_537), environment=args.environment))
+            return 0
+        if args.bootstrap_proof:
+            path=Path(args.bootstrap_proof)
+            if path.stat().st_size>65_536:
+                raise ValueError('proof_too_large')
+            validate_bootstrap(json.loads(path.read_text()),environment=args.environment,version=args.expected_sha,
+                project_ref=args.expected_project_ref,apply=args.expect_applied)
             return 0
         if args.proof:
             path=Path(args.proof)
