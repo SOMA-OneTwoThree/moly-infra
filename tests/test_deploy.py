@@ -82,7 +82,8 @@ elif name=='docker':
     elif args[0]=='run':
         if '-c' in args:
             expr=args[args.index('-c')+1]
-            if 'preflight_chat_content_encryption.py' in expr: event('bootstrap_probe');fail('bootstrap_probe')
+            if 'check_daily_report.py' in expr: event('report_probe');fail('report_probe')
+            elif 'preflight_chat_content_encryption.py' in expr: event('bootstrap_probe');fail('bootstrap_probe')
             elif 'db.schema_contract' in expr: event('schema_probe');fail('schema_probe')
             elif 'worker.consumer' in expr: event('consumer_probe');fail('consumer_probe')
             else: raise AssertionError(args)
@@ -116,6 +117,22 @@ elif name=='docker':
                  'crisis_guard_history_messages','chat_content_encryption_state')}}
             if case.get('bootstrap_bad'): proof['version']='wrong'
             print(json.dumps(proof))
+        elif 'scripts/check_daily_report.py' in args:
+            event('candidate_report')
+            assert args[args.index('--env-file')+1].endswith('backend.env.next')
+            failed=bool(case.get('report_fail'))
+            value={'daily_report':'failed' if failed else 'ok','environment':args[args.index('--environment')+1],
+              'version':args[args.index('--expected-sha')+1],'read_only':True,'slack_sent':False,'elapsed_ms':2501 if failed else 40}
+            if failed:
+                value.update(error='ValueError',diagnostic_format='daily-report-diagnostics-v1',diagnostics_truncated=False,
+                  failures=[{'phase':'metric','metric':'diaries','exception':'DBAPIError','sqlstate':'57014',
+                    'elapsed_ms':2501,'attempt':1,'retry':False}])
+            if case.get('report_invalid'):
+                print('secret-diagnostic-canary raw SQL password')
+                print('secret-stderr-canary',file=sys.stderr)
+                sys.exit(1)
+            print(json.dumps(value))
+            if failed: sys.exit(1)
         elif 'scripts/check_chat_content_crypto.py' in args:
             event('crypto_proof');fail('crypto_proof_fail')
             print(json.dumps({'capability':'chat-content-aead-v1','environment':('development' if case.get('environment')=='dev' else 'production'),
@@ -194,6 +211,11 @@ class DeployTests(unittest.TestCase):
             files['next_left'] = sorted(p.name for p in state.glob('*.next')) if state.exists() else []
             files['hash_written'] = (state / 'backend.hash').exists()
             files['units'] = sorted(p.name for p in (root / 'host/systemd/system').iterdir())
+            for key, filename in [('daily_report','daily-report-candidate.json'),('report_stderr','daily-report-candidate.stderr.json')]:
+                path=state/filename
+                files[key]=json.loads(path.read_text()) if path.exists() else None
+                if path.exists():
+                    self.assertEqual(path.stat().st_mode & 0o777,0o600)
             return runs[-1], events, files
 
     def crypto_case(self, **updates):
@@ -295,7 +317,7 @@ class DeployTests(unittest.TestCase):
                 self.assertEqual(run.returncode,0,run.stderr)
                 kinds=[e['kind'] for e in events]
                 self.assertIn('bootstrap_controller',kinds)
-                for forbidden in ('crypto_floor','schema_probe','full_schema','up','systemctl','ready','crypto_proof'):
+                for forbidden in ('crypto_floor','schema_probe','full_schema','up','systemctl','ready','crypto_proof','candidate_report','report_probe'):
                     self.assertNotIn(forbidden,kinds)
                 event=next(e for e in events if e['kind']=='bootstrap_controller')
                 self.assertIn('--check',event['args'])
@@ -338,6 +360,43 @@ class DeployTests(unittest.TestCase):
                 self.assertEqual(files['backend.env'],'OLD_ENV=keep\n')
                 self.assertNotIn('up',[e['kind'] for e in events])
                 self.assertNotIn('remove_consumer',[e['kind'] for e in events])
+
+    def test_candidate_report_precedes_preflight_return_live_files_and_timer_on_both_environments(self):
+        for environment in ('dev','prod'):
+            with self.subTest(environment=environment):
+                case=self.crypto_case(environment=environment,image_tag=('dev-' if environment=='dev' else '')+'a'*40)
+                run,events,files=self.run_deploy(case,extra_env={'DEPLOY_PREFLIGHT_ONLY':'1'})
+                self.assertEqual(run.returncode,0,run.stderr)
+                kinds=[e['kind'] for e in events]
+                self.assertLess(kinds.index('crypto_proof'),kinds.index('candidate_report'))
+                self.assertNotIn('up',kinds)
+                self.assertNotIn('systemctl',kinds)
+                self.assertEqual(files['backend.env'],'OLD_ENV=keep\n')
+                self.assertTrue(files['fcm_preserved_inode'])
+                self.assertEqual(files['daily_report']['daily_report'],'ok')
+
+    def test_candidate_report_failure_missing_script_and_invalid_output_preserve_all_live_state(self):
+        for environment in ('dev','prod'):
+            for update in ({'report_fail':True},{'report_probe':3},{'report_invalid':True}):
+                with self.subTest(environment=environment,update=update):
+                    case=self.crypto_case(environment=environment,image_tag=('dev-' if environment=='dev' else '')+'a'*40,**update)
+                    run,events,files=self.run_deploy(case)
+                    self.assertNotEqual(run.returncode,0)
+                    self.assertEqual(files['backend.env'],'OLD_ENV=keep\n')
+                    self.assertIn('IMAGE_TAG=old-image',files['.env'])
+                    self.assertEqual(json.loads(files['fcm']),{'project_id':'old-project'})
+                    self.assertTrue(files['fcm_preserved_inode'])
+                    self.assertFalse(files['hash_written'])
+                    self.assertEqual(files['units'],[])
+                    self.assertEqual(files['next_left'],[])
+                    self.assertEqual(files['daily_report']['daily_report'],'failed')
+                    self.assertNotIn('up',[e['kind'] for e in events])
+                    self.assertNotIn('systemctl',[e['kind'] for e in events])
+                    safe=run.stdout+run.stderr+json.dumps(files['daily_report'])+json.dumps(files['report_stderr'])
+                    self.assertNotIn('canary',safe)
+                    if update.get('report_fail'):
+                        self.assertIn('metric=diaries',run.stdout)
+                        self.assertIn('sqlstate=57014',run.stdout)
 
     def test_raw_ssm_key_is_wrapped_before_candidate_and_runtime_checks(self):
         encoded=base64.b64encode(b'x'*32).decode()

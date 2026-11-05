@@ -400,6 +400,16 @@ if [ "$CRYPTO_SUPPORTED" = 1 ]; then
     echo "ERROR: chat content crypto candidate proof invalid" >&2; exit 1
   fi
   echo "==> chat content crypto candidate preflight OK"
+  # The candidate report uses the SAME SQL/overall budgets before any live
+  # files, worker timer, container or caller ALB membership may change.
+  rm -f "$STATE_DIR/daily-report-candidate.json" "$STATE_DIR/daily-report-candidate.stderr.json"
+  if ! python3 "$SCRIPT_DIR/scripts/verify_daily_report_preflight.py" \
+      --image "$BACKEND_IMAGE" --env-file "$NEXT_BACKEND_ENV_FILE" \
+      --environment "$APP_ENV" --expected-sha "${IMAGE_TAG#dev-}" \
+      --output "$STATE_DIR/daily-report-candidate.json"; then
+    rm -f "$NEXT_FCM_FILE" "$NEXT_BACKEND_ENV_FILE" "$NEXT_COMPOSE_ENV_FILE"
+    echo "ERROR: candidate readonly daily report preflight failed" >&2; exit 1
+  fi
 fi
 
 # 사전점검 모드는 여기서 끝낸다. prod workflow는 서버를 ALB에서 빼기 전에 모든 서버에서 이 단계를
