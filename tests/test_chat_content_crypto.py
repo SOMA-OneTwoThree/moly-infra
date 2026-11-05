@@ -2,6 +2,7 @@
 import importlib.util
 import base64
 import json
+import os
 from pathlib import Path
 import subprocess
 import tempfile
@@ -105,6 +106,11 @@ class DrainShellTests(unittest.TestCase):
     def run_fragment(self,case):
         source=(ROOT/'deploy.sh').read_text()
         setup=source[source.index('CRYPTO_TIMER_PAUSED=0'):source.index('# 여기서부터 live 파일을 바꾼다.')]
+        # This fixture isolates graceful drain/timer behavior. The complete
+        # image/env/key launch check is exercised by DeployTests; provide its
+        # successful dependency here instead of running it with missing host
+        # paths. Record the call so its ordering remains observable.
+        launch_check='\ncrypto_verify_worker_launch() { printf "worker_launch_check\\n" >> "$EVENTS"; }\n'
         start=source.index('if [ "$CRYPTO_SUPPORTED" = 1 ]; then\n  while true; do')
         stop=source.index('# ---------------------------------------------------------------------------\n# 7.',start)
         drain=source[start:stop]
@@ -133,7 +139,8 @@ exit 0
                 script.write_text(script.read_text().replace('[ "$CASE" != stopfail ] ;;','[ "$CASE" != stopfail ] || exit 1 ;;'))
                 script.chmod(0o755)
             env={'PATH':str(path)+':/usr/bin:/bin','EVENTS':str(log),'CASE':case}
-            result=subprocess.run(['/bin/bash','-c','set -euo pipefail\nCRYPTO_SUPPORTED=1\n'+setup+drain],
+            result=subprocess.run([os.environ.get('MOLY_TEST_BASH','/bin/bash'),'-c',
+                                   'set -euo pipefail\nCRYPTO_SUPPORTED=1\n'+setup+launch_check+drain],
                                   env=env,capture_output=True,text=True,timeout=3)
             return result,log.read_text()
 
@@ -143,6 +150,7 @@ exit 0
         self.assertIn('old worker drain complete',result.stdout)
         self.assertIn('systemctl stop moly-worker.timer',log)
         self.assertIn('systemctl start moly-worker.timer',log)
+        self.assertLess(log.index('worker_launch_check'),log.index('systemctl start moly-worker.timer'))
 
     def test_orphan_tick_times_out_and_restores_timer(self):
         result,log=self.run_fragment('timeout')
@@ -183,9 +191,11 @@ class BootstrapProofTests(unittest.TestCase):
     def test_before_expansion_key_proof_is_valid_but_apply_requires_expanded_schema(self):
         value=self.proof()
         self.validate(value)
-        with self.assertRaises(ValueError): self.validate(value,apply=True)
+        with self.assertRaises(ValueError):
+            self.validate(value,apply=True)
         self.validate({**value,'schema_status':'expanded','applied':True},apply=True)
-        with self.assertRaises(ValueError): self.validate({**value,'applied':True})
+        with self.assertRaises(ValueError):
+            self.validate({**value,'applied':True})
 
     def test_receipt_rejects_wrong_target_version_sql_keys_or_partial_snapshot(self):
         for key,wrong in [('project_ref','wrong'),('version','b'*40),('sql_sha256','d'*64),
@@ -197,6 +207,7 @@ class BootstrapProofTests(unittest.TestCase):
         value=self.proof()
         value['config_snapshot'][module.KEY]={'exists':True,'value':{
             'started':False,'format_version':1,'active_key_id':2,'required_key_ids':[1,2]}}
-        with self.assertRaises(ValueError): self.validate(value)
+        with self.assertRaises(ValueError):
+            self.validate(value)
         value['key_fingerprints']['2']='e'*64
         self.validate(value)
